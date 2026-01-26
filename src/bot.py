@@ -370,7 +370,7 @@ async def handle_photo(message: Message, bot: Bot):
             "Оплатите, чтобы открыть ссылку.</i>"
         )
 
-        for i, face in enumerate(faces[:5], 1):
+        for i, face in enumerate(faces[:10], 1):
             score = face.get("score", 0)
 
             caption = f"<b>#{i}</b> - Score: {score}%\n🔒 <i>Link hidden / Ссылка скрыта</i>"
@@ -400,7 +400,7 @@ async def handle_photo(message: Message, bot: Bot):
         # Paid search - show full results
         await status_msg.edit_text(stats + "\nSending results... / Отправка результатов...")
 
-        for i, face in enumerate(faces[:5], 1):
+        for i, face in enumerate(faces[:10], 1):
             score = face.get("score", 0)
             url = face.get("url", "N/A")
 
