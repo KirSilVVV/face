@@ -25,6 +25,9 @@ from src import database as db
 router = Router()
 facecheck = FaceCheckClient()
 
+# Version for debugging deployments
+BOT_VERSION = "v2.0-test-1star"
+
 # Store pending search results temporarily (search_id -> results)
 pending_results: dict[str, dict] = {}
 
@@ -171,7 +174,8 @@ async def cmd_info(message: Message):
         f"Free searches: {free}\n"
         f"Paid searches: {paid}\n"
         f"Total: {total}\n\n"
-        f"API credits: {api_credits}"
+        f"API credits: {api_credits}\n"
+        f"Bot version: {BOT_VERSION}"
     )
 
 
