@@ -10,12 +10,8 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 FACECHECK_BASE_URL = "https://facecheck.id/api"
 
-# Pricing in Telegram Stars (TEST: 1 star each, change back later)
-PRICING = {
-    1: 1,      # 1 search = 1 star (TEST)
-    5: 5,      # 5 searches = 5 stars (TEST)
-    10: 10,    # 10 searches = 10 stars (TEST)
-}
+# Paid search cost (after free trial)
+SEARCH_COST_STARS = 3
 
-# Unlock single result cost (TEST: 1 star, change back later)
-UNLOCK_COST_STARS = 1
+# Unlock single result link cost (for free search results)
+UNLOCK_COST_STARS = 2

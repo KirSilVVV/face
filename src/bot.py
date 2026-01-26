@@ -18,7 +18,7 @@ from PIL import Image, ImageFilter
 
 logger = logging.getLogger(__name__)
 
-from src.config import TELEGRAM_BOT_TOKEN, PRICING, UNLOCK_COST_STARS
+from src.config import TELEGRAM_BOT_TOKEN, SEARCH_COST_STARS, UNLOCK_COST_STARS
 from src.facecheck_client import FaceCheckClient
 from src import database as db
 
@@ -26,62 +26,46 @@ router = Router()
 facecheck = FaceCheckClient()
 
 # Version for debugging deployments
-BOT_VERSION = "v2.0-test-1star"
+BOT_VERSION = "v3.0-new-pricing"
 
 # Store pending search results temporarily (search_id -> results)
 pending_results: dict[str, dict] = {}
 
-WELCOME_MESSAGE = """<b>Face Search Bot</b>
+# Store pending photos for paid search (user_id -> image_bytes)
+pending_photos: dict[int, bytes] = {}
+
+WELCOME_MESSAGE = """<b>🔍 Face Search Bot</b>
 
 Send me a photo of a person and I'll search for their profiles online.
 
 <b>How it works:</b>
 1. Send a photo with a clear face
-2. Get your first search FREE
-3. Results show where the face appears online
+2. First search is <b>FREE</b> (10 results, links hidden)
+3. Unlock any link for {unlock_cost} ⭐
+4. After trial: {search_cost} ⭐ per search (5 results with links)
 
 <b>Commands:</b>
 /start - Show this message
-/info - Check your credits
-/buy - Purchase more searches
+/info - Check your status
 
 ---
 
-<b>Бот Поиска по Лицу</b>
+<b>🔍 Бот Поиска по Лицу</b>
 
 Отправьте фото человека, и я найду его профили в интернете.
 
 <b>Как это работает:</b>
 1. Отправьте фото с четким лицом
-2. Первый поиск БЕСПЛАТНО
-3. Результаты покажут, где лицо появляется онлайн
-
-<b>Команды:</b>
-/start - Показать это сообщение
-/info - Проверить кредиты
-/buy - Купить поиски
+2. Первый поиск <b>БЕСПЛАТНО</b> (10 результатов, ссылки скрыты)
+3. Открыть любую ссылку за {unlock_cost} ⭐
+4. После триала: {search_cost} ⭐ за поиск (5 результатов со ссылками)
 
 ---
 
-<i>Disclaimer: Results are based on visual similarity only. This tool cannot confirm identity. Use responsibly.</i>"""
-
-BUY_MESSAGE = """<b>Buy Search Credits</b>
-
-Choose a package:
-
-1 search = 1 ⭐ (TEST)
-5 searches = 5 ⭐ (TEST)
-10 searches = 10 ⭐ (TEST)
-
----
-
-<b>Купить Кредиты</b>
-
-Выберите пакет:
-
-1 поиск = 1 ⭐ (ТЕСТ)
-5 поисков = 5 ⭐ (ТЕСТ)
-10 поисков = 10 ⭐ (ТЕСТ)"""
+<i>Disclaimer: Results are based on visual similarity only. This tool cannot confirm identity. Use responsibly.</i>""".format(
+    unlock_cost=UNLOCK_COST_STARS,
+    search_cost=SEARCH_COST_STARS
+)
 
 
 def blur_image(img_bytes: bytes, blur_radius: int = 30) -> bytes:
@@ -129,12 +113,13 @@ async def get_image_bytes(face: dict) -> bytes | None:
     return None
 
 
-def get_buy_keyboard() -> InlineKeyboardMarkup:
-    """Create keyboard for buying searches."""
+def get_search_keyboard() -> InlineKeyboardMarkup:
+    """Create keyboard for buying a paid search."""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="1 search - 1 ⭐", callback_data="buy_1")],
-        [InlineKeyboardButton(text="5 searches - 5 ⭐", callback_data="buy_5")],
-        [InlineKeyboardButton(text="10 searches - 10 ⭐", callback_data="buy_10")],
+        [InlineKeyboardButton(
+            text=f"🔍 Search / Поиск - {SEARCH_COST_STARS} ⭐",
+            callback_data="paid_search"
+        )],
     ])
 
 
@@ -181,7 +166,23 @@ async def cmd_info(message: Message):
 
 @router.message(Command("buy"))
 async def cmd_buy(message: Message):
-    await message.answer(BUY_MESSAGE, reply_markup=get_buy_keyboard())
+    credits = await db.get_user_credits(message.from_user.id)
+    free = credits.get("free_searches", 0)
+
+    if free > 0:
+        await message.answer(
+            f"You still have {free} FREE search(es)! Just send a photo.\n\n"
+            f"У вас еще есть {free} БЕСПЛАТНЫЙ поиск! Просто отправьте фото."
+        )
+    else:
+        await message.answer(
+            f"<b>Paid Search / Платный поиск</b>\n\n"
+            f"Each search costs {SEARCH_COST_STARS} ⭐\n"
+            f"You get 5 results with direct links.\n\n"
+            f"Каждый поиск стоит {SEARCH_COST_STARS} ⭐\n"
+            f"Вы получите 5 результатов с прямыми ссылками.\n\n"
+            f"Send a photo to start / Отправьте фото для начала"
+        )
 
 
 @router.message(Command("reset"))
@@ -197,22 +198,16 @@ async def cmd_reset(message: Message):
         await message.answer("Failed to reset credits. / Не удалось сбросить кредиты.")
 
 
-@router.callback_query(F.data.startswith("buy_"))
-async def handle_buy(callback: CallbackQuery, bot: Bot):
-    amount = int(callback.data.split("_")[1])
-    price = PRICING.get(amount)
-
-    if not price:
-        await callback.answer("Invalid package")
-        return
-
+@router.callback_query(F.data == "paid_search")
+async def handle_paid_search_request(callback: CallbackQuery, bot: Bot):
+    """User wants to do a paid search - send invoice."""
     await bot.send_invoice(
         chat_id=callback.from_user.id,
-        title=f"{amount} Face Search{'es' if amount > 1 else ''}",
-        description=f"Purchase {amount} face search credit{'s' if amount > 1 else ''}",
-        payload=f"searches_{amount}",
-        currency="XTR",  # Telegram Stars
-        prices=[LabeledPrice(label=f"{amount} search{'es' if amount > 1 else ''}", amount=price)],
+        title="Face Search / Поиск по лицу",
+        description=f"Search for face matches (5 results with links) / Поиск совпадений (5 результатов со ссылками)",
+        payload="paid_search",
+        currency="XTR",
+        prices=[LabeledPrice(label="Face Search", amount=SEARCH_COST_STARS)],
     )
     await callback.answer()
 
@@ -241,24 +236,25 @@ async def handle_pre_checkout(pre_checkout: PreCheckoutQuery, bot: Bot):
 
 
 @router.message(F.successful_payment)
-async def handle_successful_payment(message: Message):
+async def handle_successful_payment(message: Message, bot: Bot):
     payload = message.successful_payment.invoice_payload
     payment_id = message.successful_payment.telegram_payment_charge_id
     stars = message.successful_payment.total_amount
+    user_id = message.from_user.id
 
-    if payload.startswith("searches_"):
-        amount = int(payload.split("_")[1])
-        await db.add_paid_searches(message.from_user.id, amount)
-        await db.record_payment(
-            message.from_user.id,
-            stars,
-            amount,
-            payment_id
-        )
-        await message.answer(
-            f"Payment successful! Added {amount} search{'es' if amount > 1 else ''}.\n\n"
-            f"Оплата прошла! Добавлено {amount} поиск{'ов' if amount > 1 else ''}."
-        )
+    if payload == "paid_search":
+        # User paid for a search - now execute it
+        await db.record_payment(user_id, stars, 1, payment_id)
+
+        if user_id not in pending_photos:
+            await message.answer(
+                "Payment received but no photo found. Please send a new photo.\n\n"
+                "Оплата получена, но фото не найдено. Отправьте новое фото."
+            )
+            return
+
+        image_bytes = pending_photos.pop(user_id)
+        await execute_paid_search(message, bot, image_bytes)
 
     elif payload.startswith("unlock_"):
         parts = payload.split("_")
@@ -274,20 +270,90 @@ async def handle_successful_payment(message: Message):
                 face = faces[result_index]
                 url = face.get("url", "N/A")
 
-                # Just show the unlocked link
                 await message.answer(
                     f"🔓 <b>Link Unlocked / Ссылка открыта</b>\n\n"
                     f"Score: {face.get('score', 0)}%\n"
                     f"🔗 {url}",
                     link_preview_options=LinkPreviewOptions(is_disabled=True)
                 )
+        else:
+            await message.answer(
+                "Results expired. Please do a new search.\n\n"
+                "Результаты устарели. Сделайте новый поиск."
+            )
 
-        await db.record_payment(
-            message.from_user.id,
-            stars,
-            0,  # No searches, just unlock
-            payment_id
-        )
+        await db.record_payment(user_id, stars, 0, payment_id)
+
+
+async def execute_paid_search(message: Message, bot: Bot, image_bytes: bytes):
+    """Execute a paid search and show 5 results with links."""
+    status_msg = await message.answer("🔍 Searching... / Поиск...")
+
+    last_progress_text = ""
+
+    async def on_progress(progress: int):
+        nonlocal last_progress_text
+        new_text = f"🔍 Searching... {progress}% / Поиск... {progress}%"
+        if new_text != last_progress_text:
+            try:
+                await status_msg.edit_text(new_text)
+                last_progress_text = new_text
+            except TelegramBadRequest:
+                pass
+
+    result = await facecheck.find_face(image_bytes, demo=False, on_progress=on_progress)
+
+    if not result:
+        await status_msg.edit_text("Search failed. Please try again.\n\nОшибка поиска. Попробуйте снова.")
+        return
+
+    if result.get("error"):
+        await status_msg.edit_text(f"Error: {result['error']}")
+        return
+
+    output = result.get("output", {})
+    faces = output.get("items", [])
+
+    searched = output.get('searchedFaces')
+    searched_str = f"{searched:,}" if isinstance(searched, int) else "N/A"
+    took_sec = output.get('tookSeconds') or 0
+
+    stats = (
+        f"<b>✅ Search Complete / Поиск завершен</b>\n\n"
+        f"Faces scanned: {searched_str}\n"
+        f"Time: {took_sec:.1f}s\n"
+        f"Results: {min(len(faces), 5)}\n"
+    )
+
+    if not faces:
+        await status_msg.edit_text(stats + "\n<i>No matches found. / Совпадений не найдено.</i>")
+        return
+
+    await status_msg.edit_text(stats + "\nSending results... / Отправка результатов...")
+
+    # Paid search: show 5 results with links
+    for i, face in enumerate(faces[:5], 1):
+        score = face.get("score", 0)
+        url = face.get("url", "N/A")
+
+        caption = f"<b>#{i}</b> - Score: {score}%\n🔗 {url}"
+
+        img_bytes = await get_image_bytes(face)
+        if img_bytes:
+            try:
+                photo_file = BufferedInputFile(img_bytes, filename=f"face_{i}.jpg")
+                await message.answer_photo(
+                    photo_file,
+                    caption=caption,
+                    link_preview_options=LinkPreviewOptions(is_disabled=True)
+                )
+            except Exception as e:
+                logger.error(f"Send photo error: {e}")
+                await message.answer(caption, link_preview_options=LinkPreviewOptions(is_disabled=True))
+        else:
+            await message.answer(caption, link_preview_options=LinkPreviewOptions(is_disabled=True))
+
+    await status_msg.delete()
 
 
 @router.message(F.photo)
@@ -297,31 +363,40 @@ async def handle_photo(message: Message, bot: Bot):
         message.from_user.username
     )
 
-    # Check if user has credits
     credits = await db.get_user_credits(message.from_user.id)
-    total_credits = credits.get("free_searches", 0) + credits.get("paid_searches", 0)
+    free_searches = credits.get("free_searches", 0)
 
-    if total_credits <= 0:
-        await message.answer(
-            "You have no search credits.\n"
-            "Use /buy to purchase more.\n\n"
-            "У вас нет кредитов.\n"
-            "Используйте /buy для покупки.",
-            reply_markup=get_buy_keyboard()
-        )
-        return
-
-    status_msg = await message.answer("Uploading image... / Загрузка...")
-
+    # Download the photo
     photo = message.photo[-1]
     file = await bot.get_file(photo.file_id)
-    image_bytes = await bot.download_file(file.file_path)
+    image_data = await bot.download_file(file.file_path)
+    image_bytes = image_data.read()
+
+    if free_searches > 0:
+        # FREE SEARCH: 10 results with hidden links
+        await execute_free_search(message, bot, image_bytes)
+    else:
+        # PAID SEARCH: Store photo and request payment
+        pending_photos[message.from_user.id] = image_bytes
+        await bot.send_invoice(
+            chat_id=message.from_user.id,
+            title="Face Search / Поиск по лицу",
+            description=f"Search for face matches (5 results with links)\nПоиск совпадений (5 результатов со ссылками)",
+            payload="paid_search",
+            currency="XTR",
+            prices=[LabeledPrice(label="Face Search", amount=SEARCH_COST_STARS)],
+        )
+
+
+async def execute_free_search(message: Message, bot: Bot, image_bytes: bytes):
+    """Execute a free search and show 10 results with hidden links."""
+    status_msg = await message.answer("🔍 Searching... / Поиск...")
 
     last_progress_text = ""
 
     async def on_progress(progress: int):
         nonlocal last_progress_text
-        new_text = f"Searching... {progress}% / Поиск... {progress}%"
+        new_text = f"🔍 Searching... {progress}% / Поиск... {progress}%"
         if new_text != last_progress_text:
             try:
                 await status_msg.edit_text(new_text)
@@ -329,119 +404,65 @@ async def handle_photo(message: Message, bot: Bot):
             except TelegramBadRequest:
                 pass
 
-    await status_msg.edit_text("Searching... / Поиск...")
-    result = await facecheck.find_face(
-        image_bytes.read(),
-        demo=False,
-        on_progress=on_progress
-    )
+    result = await facecheck.find_face(image_bytes, demo=False, on_progress=on_progress)
 
     if not result:
-        await status_msg.edit_text("Search failed. Please try again. / Ошибка. Попробуйте снова.")
+        await status_msg.edit_text("Search failed. Please try again.\n\nОшибка поиска. Попробуйте снова.")
         return
 
     if result.get("error"):
         await status_msg.edit_text(f"Error: {result['error']}")
         return
 
-    # Use one credit
-    success, is_free = await db.use_search(message.from_user.id)
+    # Use free search credit
+    await db.use_search(message.from_user.id)
 
     output = result.get("output", {})
     faces = output.get("items", [])
 
-    # Build statistics
     searched = output.get('searchedFaces')
     searched_str = f"{searched:,}" if isinstance(searched, int) else "N/A"
     took_sec = output.get('tookSeconds') or 0
-    max_score = output.get('max_score') or 0
 
-    credit_type = "FREE" if is_free else "paid"
     stats = (
-        f"<b>Search Complete / Поиск завершен</b>\n\n"
+        f"<b>✅ FREE Search Complete / Бесплатный поиск завершен</b>\n\n"
         f"Faces scanned: {searched_str}\n"
         f"Time: {took_sec:.1f}s\n"
-        f"Max score: {max_score}%\n"
-        f"Results: {len(faces)}\n"
-        f"Credit used: {credit_type}\n"
+        f"Results: {min(len(faces), 10)}\n"
     )
 
     if not faces:
         await status_msg.edit_text(stats + "\n<i>No matches found. / Совпадений не найдено.</i>")
         return
 
-    # Store results for potential unlock
     search_id = result.get("id_search") or str(message.message_id)
     pending_results[search_id] = result
 
-    # For free search, show photos but hide links
-    if is_free:
-        await status_msg.edit_text(
-            stats + "\n<i>First search is FREE but links are hidden.\n"
-            "Pay to unlock each link.\n\n"
-            "Первый поиск БЕСПЛАТНО, но ссылки скрыты.\n"
-            "Оплатите, чтобы открыть ссылку.</i>"
-        )
+    await status_msg.edit_text(
+        stats + f"\n<i>🔒 Links are hidden. Unlock each for {UNLOCK_COST_STARS} ⭐\n"
+        f"Ссылки скрыты. Открыть каждую за {UNLOCK_COST_STARS} ⭐</i>"
+    )
 
-        for i, face in enumerate(faces[:10], 1):
-            score = face.get("score", 0)
+    # Free search: show 10 results with hidden links
+    for i, face in enumerate(faces[:10], 1):
+        score = face.get("score", 0)
 
-            caption = f"<b>#{i}</b> - Score: {score}%\n🔒 <i>Link hidden / Ссылка скрыта</i>"
+        caption = f"<b>#{i}</b> - Score: {score}%\n🔒 <i>Link hidden / Ссылка скрыта</i>"
 
-            # Show photo without blur, but hide the link
-            img_bytes = await get_image_bytes(face)
-            if img_bytes:
-                try:
-                    photo_file = BufferedInputFile(img_bytes, filename=f"face_{i}.jpg")
-                    await message.answer_photo(
-                        photo_file,
-                        caption=caption,
-                        reply_markup=get_unlock_keyboard(search_id, i - 1)
-                    )
-                except Exception as e:
-                    logger.error(f"Send photo error: {e}")
-                    await message.answer(
-                        caption,
-                        reply_markup=get_unlock_keyboard(search_id, i - 1)
-                    )
-            else:
-                await message.answer(
-                    caption,
+        img_bytes = await get_image_bytes(face)
+        if img_bytes:
+            try:
+                photo_file = BufferedInputFile(img_bytes, filename=f"face_{i}.jpg")
+                await message.answer_photo(
+                    photo_file,
+                    caption=caption,
                     reply_markup=get_unlock_keyboard(search_id, i - 1)
                 )
-    else:
-        # Paid search - show full results
-        await status_msg.edit_text(stats + "\nSending results... / Отправка результатов...")
-
-        for i, face in enumerate(faces[:10], 1):
-            score = face.get("score", 0)
-            url = face.get("url", "N/A")
-
-            caption = f"<b>#{i}</b> - Score: {score}%\n{url}"
-
-            # Try to get the image
-            img_bytes = await get_image_bytes(face)
-            if img_bytes:
-                try:
-                    photo_file = BufferedInputFile(img_bytes, filename=f"face_{i}.jpg")
-                    await message.answer_photo(
-                        photo_file,
-                        caption=caption,
-                        link_preview_options=LinkPreviewOptions(is_disabled=True)
-                    )
-                except Exception as e:
-                    logger.error(f"Send photo error: {e}")
-                    await message.answer(
-                        caption,
-                        link_preview_options=LinkPreviewOptions(is_disabled=True)
-                    )
-            else:
-                await message.answer(
-                    caption,
-                    link_preview_options=LinkPreviewOptions(is_disabled=True)
-                )
-
-        await status_msg.delete()
+            except Exception as e:
+                logger.error(f"Send photo error: {e}")
+                await message.answer(caption, reply_markup=get_unlock_keyboard(search_id, i - 1))
+        else:
+            await message.answer(caption, reply_markup=get_unlock_keyboard(search_id, i - 1))
 
 
 @router.message()
