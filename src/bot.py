@@ -1,4 +1,5 @@
 import base64
+import logging
 from io import BytesIO
 
 from aiogram import Bot, Dispatcher, Router, F
@@ -6,6 +7,9 @@ from aiogram.types import Message, LinkPreviewOptions, BufferedInputFile
 from aiogram.filters import CommandStart, Command
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
+from aiogram.exceptions import TelegramBadRequest
+
+logger = logging.getLogger(__name__)
 
 from src.config import TELEGRAM_BOT_TOKEN
 from src.facecheck_client import FaceCheckClient
@@ -49,10 +53,19 @@ async def handle_photo(message: Message, bot: Bot):
     file = await bot.get_file(photo.file_id)
     image_bytes = await bot.download_file(file.file_path)
 
-    async def on_progress(progress: int):
-        await status_msg.edit_text(f"Searching... {progress}%")
+    last_progress_text = ""
 
-    await status_msg.edit_text("Searching... 0%")
+    async def on_progress(progress: int):
+        nonlocal last_progress_text
+        new_text = f"Searching... {progress}%"
+        if new_text != last_progress_text:
+            try:
+                await status_msg.edit_text(new_text)
+                last_progress_text = new_text
+            except TelegramBadRequest:
+                pass  # Message already has this text
+
+    await status_msg.edit_text("Searching...")
     result = await facecheck.find_face(
         image_bytes.read(),
         demo=True,
@@ -71,11 +84,16 @@ async def handle_photo(message: Message, bot: Bot):
     faces = output.get("items", [])
 
     # Build statistics
+    searched = output.get('searchedFaces')
+    searched_str = f"{searched:,}" if isinstance(searched, int) else "N/A"
+    took_sec = output.get('tookSeconds') or 0
+    max_score = output.get('max_score') or 0
+
     stats = (
         f"<b>Search Complete</b>\n\n"
-        f"Faces scanned: {output.get('searchedFaces', 'N/A'):,}\n"
-        f"Time: {output.get('tookSeconds', 0):.1f}s\n"
-        f"Max score: {output.get('max_score', 0)}%\n"
+        f"Faces scanned: {searched_str}\n"
+        f"Time: {took_sec:.1f}s\n"
+        f"Max score: {max_score}%\n"
         f"Results: {len(faces)}\n"
     )
 
