@@ -136,10 +136,10 @@ def get_buy_keyboard() -> InlineKeyboardMarkup:
 
 
 def get_unlock_keyboard(search_id: str, result_index: int) -> InlineKeyboardMarkup:
-    """Create keyboard to unlock a single result."""
+    """Create keyboard to unlock a single result link."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
-            text=f"Unlock for {UNLOCK_COST_STARS} ⭐",
+            text=f"🔓 Unlock link / Открыть ссылку - {UNLOCK_COST_STARS} ⭐",
             callback_data=f"unlock_{search_id}_{result_index}"
         )],
     ])
@@ -206,14 +206,14 @@ async def handle_unlock(callback: CallbackQuery, bot: Bot):
     search_id = parts[1]
     result_index = int(parts[2])
 
-    # Send invoice for unlocking
+    # Send invoice for unlocking the link
     await bot.send_invoice(
         chat_id=callback.from_user.id,
-        title="Unlock Search Result",
-        description="Unlock this face match to see the full image and link",
+        title="Unlock Link / Открыть ссылку",
+        description="Get the source link for this face match / Получить ссылку на источник",
         payload=f"unlock_{search_id}_{result_index}",
         currency="XTR",
-        prices=[LabeledPrice(label="Unlock result", amount=UNLOCK_COST_STARS)],
+        prices=[LabeledPrice(label="Unlock link", amount=UNLOCK_COST_STARS)],
     )
     await callback.answer()
 
@@ -257,25 +257,13 @@ async def handle_successful_payment(message: Message):
                 face = faces[result_index]
                 url = face.get("url", "N/A")
 
-                caption = f"<b>Unlocked Result</b>\n\nScore: {face.get('score', 0)}%\n{url}"
-
-                # Try to get the image
-                img_bytes = await get_image_bytes(face)
-                if img_bytes:
-                    try:
-                        photo_file = BufferedInputFile(img_bytes, filename="face.jpg")
-                        await message.answer_photo(
-                            photo_file,
-                            caption=caption,
-                            link_preview_options=LinkPreviewOptions(is_disabled=True)
-                        )
-                    except Exception:
-                        await message.answer(
-                            caption,
-                            link_preview_options=LinkPreviewOptions(is_disabled=True)
-                        )
-                else:
-                    await message.answer(caption)
+                # Just show the unlocked link
+                await message.answer(
+                    f"🔓 <b>Link Unlocked / Ссылка открыта</b>\n\n"
+                    f"Score: {face.get('score', 0)}%\n"
+                    f"🔗 {url}",
+                    link_preview_options=LinkPreviewOptions(is_disabled=True)
+                )
 
         await db.record_payment(
             message.from_user.id,
@@ -369,40 +357,37 @@ async def handle_photo(message: Message, bot: Bot):
     search_id = result.get("id_search") or str(message.message_id)
     pending_results[search_id] = result
 
-    # For free search, show blurred results
+    # For free search, show photos but hide links
     if is_free:
         await status_msg.edit_text(
-            stats + "\n<i>First search is FREE but results are blurred.\n"
-            "Pay to unlock each result.\n\n"
-            "Первый поиск БЕСПЛАТНО, но результаты размыты.\n"
-            "Оплатите, чтобы разблокировать.</i>"
+            stats + "\n<i>First search is FREE but links are hidden.\n"
+            "Pay to unlock each link.\n\n"
+            "Первый поиск БЕСПЛАТНО, но ссылки скрыты.\n"
+            "Оплатите, чтобы открыть ссылку.</i>"
         )
 
         for i, face in enumerate(faces[:5], 1):
             score = face.get("score", 0)
-            url = face.get("url", "")
 
-            caption = f"<b>#{i}</b> - Score: {score}%\n<i>Link hidden / Ссылка скрыта</i>"
+            caption = f"<b>#{i}</b> - Score: {score}%\n🔒 <i>Link hidden / Ссылка скрыта</i>"
 
-            # Try to get and blur the image
+            # Show photo without blur, but hide the link
             img_bytes = await get_image_bytes(face)
             if img_bytes:
                 try:
-                    blurred = blur_image(img_bytes)
-                    photo_file = BufferedInputFile(blurred, filename=f"blurred_{i}.jpg")
+                    photo_file = BufferedInputFile(img_bytes, filename=f"face_{i}.jpg")
                     await message.answer_photo(
                         photo_file,
                         caption=caption,
                         reply_markup=get_unlock_keyboard(search_id, i - 1)
                     )
                 except Exception as e:
-                    logger.error(f"Blur error: {e}")
+                    logger.error(f"Send photo error: {e}")
                     await message.answer(
                         caption,
                         reply_markup=get_unlock_keyboard(search_id, i - 1)
                     )
             else:
-                logger.warning(f"No image for result {i}, url: {url}")
                 await message.answer(
                     caption,
                     reply_markup=get_unlock_keyboard(search_id, i - 1)
