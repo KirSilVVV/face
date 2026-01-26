@@ -26,13 +26,16 @@ router = Router()
 facecheck = FaceCheckClient()
 
 # Version for debugging deployments
-BOT_VERSION = "v3.0-new-pricing"
+BOT_VERSION = "v3.1-debug"
 
 # Store pending search results temporarily (search_id -> results)
 pending_results: dict[str, dict] = {}
 
 # Store pending photos for paid search (user_id -> image_bytes)
 pending_photos: dict[int, bytes] = {}
+
+# Store last search_id for each user (for /debug command)
+last_search_by_user: dict[int, str] = {}
 
 WELCOME_MESSAGE = """<b>🔍 Face Search Bot</b>
 
@@ -47,6 +50,7 @@ Send me a photo of a person and I'll search for their profiles online.
 <b>Commands:</b>
 /start - Show this message
 /info - Check your status
+/debug - Show all results from last search
 
 ---
 
@@ -198,6 +202,64 @@ async def cmd_reset(message: Message):
         await message.answer("Failed to reset credits. / Не удалось сбросить кредиты.")
 
 
+@router.message(Command("debug"))
+async def cmd_debug(message: Message):
+    """Show all results from last search (for debugging)."""
+    user_id = message.from_user.id
+
+    if user_id not in last_search_by_user:
+        await message.answer(
+            "No recent search found. Send a photo first.\n\n"
+            "Поиск не найден. Сначала отправьте фото."
+        )
+        return
+
+    search_id = last_search_by_user[user_id]
+
+    if search_id not in pending_results:
+        await message.answer(
+            "Search results expired. Do a new search.\n\n"
+            "Результаты поиска устарели. Сделайте новый поиск."
+        )
+        return
+
+    result = pending_results[search_id]
+    output = result.get("output", {})
+    faces = output.get("items", [])
+
+    if not faces:
+        await message.answer("No results in last search. / Нет результатов в последнем поиске.")
+        return
+
+    # Build text list of ALL results
+    lines = [f"<b>🔍 Debug: All {len(faces)} results</b>\n"]
+
+    for i, face in enumerate(faces, 1):
+        score = face.get("score", 0)
+        url = face.get("url", "N/A")
+        lines.append(f"{i}. [{score}%] {url}")
+
+    # Split into chunks if too long (Telegram limit ~4096 chars)
+    full_text = "\n".join(lines)
+
+    if len(full_text) <= 4000:
+        await message.answer(full_text, link_preview_options=LinkPreviewOptions(is_disabled=True))
+    else:
+        # Send in chunks
+        chunk_lines = []
+        chunk_len = 0
+        for line in lines:
+            if chunk_len + len(line) + 1 > 4000:
+                await message.answer("\n".join(chunk_lines), link_preview_options=LinkPreviewOptions(is_disabled=True))
+                chunk_lines = []
+                chunk_len = 0
+            chunk_lines.append(line)
+            chunk_len += len(line) + 1
+
+        if chunk_lines:
+            await message.answer("\n".join(chunk_lines), link_preview_options=LinkPreviewOptions(is_disabled=True))
+
+
 @router.callback_query(F.data == "paid_search")
 async def handle_paid_search_request(callback: CallbackQuery, bot: Bot):
     """User wants to do a paid search - send invoice."""
@@ -329,6 +391,11 @@ async def execute_paid_search(message: Message, bot: Bot, image_bytes: bytes):
         await status_msg.edit_text(stats + "\n<i>No matches found. / Совпадений не найдено.</i>")
         return
 
+    # Store search results for /debug command
+    search_id = result.get("id_search") or str(message.message_id)
+    pending_results[search_id] = result
+    last_search_by_user[message.from_user.id] = search_id
+
     await status_msg.edit_text(stats + "\nSending results... / Отправка результатов...")
 
     # Paid search: show 5 results with links
@@ -437,6 +504,7 @@ async def execute_free_search(message: Message, bot: Bot, image_bytes: bytes):
 
     search_id = result.get("id_search") or str(message.message_id)
     pending_results[search_id] = result
+    last_search_by_user[message.from_user.id] = search_id
 
     await status_msg.edit_text(
         stats + f"\n<i>🔒 Links are hidden. Unlock each for {UNLOCK_COST_STARS} ⭐\n"
