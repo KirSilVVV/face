@@ -2,6 +2,7 @@ import base64
 import logging
 from io import BytesIO
 
+import httpx
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.types import (
     Message, LinkPreviewOptions, BufferedInputFile,
@@ -65,9 +66,9 @@ BUY_MESSAGE = """<b>Buy Search Credits</b>
 
 Choose a package:
 
-1 search = 149 ⭐
-5 searches = 649 ⭐ (save 20%)
-10 searches = 1199 ⭐ (save 20%)
+1 search = 1 ⭐ (TEST)
+5 searches = 5 ⭐ (TEST)
+10 searches = 10 ⭐ (TEST)
 
 ---
 
@@ -75,9 +76,9 @@ Choose a package:
 
 Выберите пакет:
 
-1 поиск = 149 ⭐
-5 поисков = 649 ⭐ (экономия 20%)
-10 поисков = 1199 ⭐ (экономия 20%)"""
+1 поиск = 1 ⭐ (ТЕСТ)
+5 поисков = 5 ⭐ (ТЕСТ)
+10 поисков = 10 ⭐ (ТЕСТ)"""
 
 
 def blur_image(img_bytes: bytes, blur_radius: int = 30) -> bytes:
@@ -89,12 +90,48 @@ def blur_image(img_bytes: bytes, blur_radius: int = 30) -> bytes:
     return output.getvalue()
 
 
+async def fetch_image_from_url(url: str) -> bytes | None:
+    """Fetch image from URL."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+            response = await client.get(url)
+            if response.status_code == 200:
+                content_type = response.headers.get("content-type", "")
+                if "image" in content_type or url.lower().endswith(('.jpg', '.jpeg', '.png', '.webp', '.gif')):
+                    return response.content
+    except Exception as e:
+        logger.error(f"Failed to fetch image from {url}: {e}")
+    return None
+
+
+async def get_image_bytes(face: dict) -> bytes | None:
+    """Get image bytes from face result - try base64 first, then URL."""
+    # Try base64 first
+    base64_img = face.get("base64", "")
+    if base64_img and base64_img.startswith("data:image"):
+        try:
+            img_data = base64_img.split(",", 1)[1]
+            return base64.b64decode(img_data)
+        except Exception as e:
+            logger.error(f"Base64 decode error: {e}")
+
+    # Try image_url or thumb_url from API
+    for url_field in ["image_url", "thumb_url", "url"]:
+        url = face.get(url_field)
+        if url and url.startswith("http"):
+            img_bytes = await fetch_image_from_url(url)
+            if img_bytes:
+                return img_bytes
+
+    return None
+
+
 def get_buy_keyboard() -> InlineKeyboardMarkup:
     """Create keyboard for buying searches."""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="1 search - 149 ⭐", callback_data="buy_1")],
-        [InlineKeyboardButton(text="5 searches - 649 ⭐", callback_data="buy_5")],
-        [InlineKeyboardButton(text="10 searches - 1199 ⭐", callback_data="buy_10")],
+        [InlineKeyboardButton(text="1 search - 1 ⭐", callback_data="buy_1")],
+        [InlineKeyboardButton(text="5 searches - 5 ⭐", callback_data="buy_5")],
+        [InlineKeyboardButton(text="10 searches - 10 ⭐", callback_data="buy_10")],
     ])
 
 
@@ -219,14 +256,13 @@ async def handle_successful_payment(message: Message):
             if result_index < len(faces):
                 face = faces[result_index]
                 url = face.get("url", "N/A")
-                base64_img = face.get("base64", "")
 
                 caption = f"<b>Unlocked Result</b>\n\nScore: {face.get('score', 0)}%\n{url}"
 
-                if base64_img and base64_img.startswith("data:image"):
+                # Try to get the image
+                img_bytes = await get_image_bytes(face)
+                if img_bytes:
                     try:
-                        img_data = base64_img.split(",", 1)[1]
-                        img_bytes = base64.b64decode(img_data)
                         photo_file = BufferedInputFile(img_bytes, filename="face.jpg")
                         await message.answer_photo(
                             photo_file,
@@ -344,14 +380,14 @@ async def handle_photo(message: Message, bot: Bot):
 
         for i, face in enumerate(faces[:5], 1):
             score = face.get("score", 0)
-            base64_img = face.get("base64", "")
+            url = face.get("url", "")
 
             caption = f"<b>#{i}</b> - Score: {score}%\n<i>Link hidden / Ссылка скрыта</i>"
 
-            if base64_img and base64_img.startswith("data:image"):
+            # Try to get and blur the image
+            img_bytes = await get_image_bytes(face)
+            if img_bytes:
                 try:
-                    img_data = base64_img.split(",", 1)[1]
-                    img_bytes = base64.b64decode(img_data)
                     blurred = blur_image(img_bytes)
                     photo_file = BufferedInputFile(blurred, filename=f"blurred_{i}.jpg")
                     await message.answer_photo(
@@ -366,6 +402,7 @@ async def handle_photo(message: Message, bot: Bot):
                         reply_markup=get_unlock_keyboard(search_id, i - 1)
                     )
             else:
+                logger.warning(f"No image for result {i}, url: {url}")
                 await message.answer(
                     caption,
                     reply_markup=get_unlock_keyboard(search_id, i - 1)
@@ -377,21 +414,21 @@ async def handle_photo(message: Message, bot: Bot):
         for i, face in enumerate(faces[:5], 1):
             score = face.get("score", 0)
             url = face.get("url", "N/A")
-            base64_img = face.get("base64", "")
 
             caption = f"<b>#{i}</b> - Score: {score}%\n{url}"
 
-            if base64_img and base64_img.startswith("data:image"):
+            # Try to get the image
+            img_bytes = await get_image_bytes(face)
+            if img_bytes:
                 try:
-                    img_data = base64_img.split(",", 1)[1]
-                    img_bytes = base64.b64decode(img_data)
                     photo_file = BufferedInputFile(img_bytes, filename=f"face_{i}.jpg")
                     await message.answer_photo(
                         photo_file,
                         caption=caption,
                         link_preview_options=LinkPreviewOptions(is_disabled=True)
                     )
-                except Exception:
+                except Exception as e:
+                    logger.error(f"Send photo error: {e}")
                     await message.answer(
                         caption,
                         link_preview_options=LinkPreviewOptions(is_disabled=True)
