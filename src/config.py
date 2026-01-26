@@ -7,6 +7,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 FACECHECK_API_KEY = os.getenv("FACECHECK_API_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+VK_ACCESS_TOKEN = os.getenv("VK_ACCESS_TOKEN")
 
 FACECHECK_BASE_URL = "https://facecheck.id/api"
 

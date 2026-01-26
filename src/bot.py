@@ -21,12 +21,13 @@ logger = logging.getLogger(__name__)
 from src.config import TELEGRAM_BOT_TOKEN, SEARCH_COST_STARS, UNLOCK_COST_STARS
 from src.facecheck_client import FaceCheckClient
 from src import database as db
+from src import vk_client
 
 router = Router()
 facecheck = FaceCheckClient()
 
 # Version for debugging deployments
-BOT_VERSION = "v3.1-debug"
+BOT_VERSION = "v3.2-vk-names"
 
 # Store pending search results temporarily (search_id -> results)
 pending_results: dict[str, dict] = {}
@@ -115,6 +116,27 @@ async def get_image_bytes(face: dict) -> bytes | None:
                 return img_bytes
 
     return None
+
+
+async def extract_names_from_results(faces: list[dict]) -> dict[str, str]:
+    """Extract names from VK profiles in search results."""
+    urls = [face.get("url", "") for face in faces if face.get("url")]
+    return await vk_client.extract_names_from_urls(urls)
+
+
+async def send_name_summary(message: Message, names: dict[str, str]):
+    """Send summary of found names."""
+    if not names:
+        return
+
+    lines = ["<b>👤 Найденные имена / Found names:</b>\n"]
+    for url, name in names.items():
+        lines.append(f"• <b>{name}</b>\n  {url}")
+
+    await message.answer(
+        "\n".join(lines),
+        link_preview_options=LinkPreviewOptions(is_disabled=True)
+    )
 
 
 def get_search_keyboard() -> InlineKeyboardMarkup:
@@ -422,6 +444,10 @@ async def execute_paid_search(message: Message, bot: Bot, image_bytes: bytes):
 
     await status_msg.delete()
 
+    # Extract and show names from VK profiles
+    names = await extract_names_from_results(faces[:5])
+    await send_name_summary(message, names)
+
 
 @router.message(F.photo)
 async def handle_photo(message: Message, bot: Bot):
@@ -531,6 +557,10 @@ async def execute_free_search(message: Message, bot: Bot, image_bytes: bytes):
                 await message.answer(caption, reply_markup=get_unlock_keyboard(search_id, i - 1))
         else:
             await message.answer(caption, reply_markup=get_unlock_keyboard(search_id, i - 1))
+
+    # Extract and show names from VK profiles
+    names = await extract_names_from_results(faces[:10])
+    await send_name_summary(message, names)
 
 
 @router.message()
