@@ -193,6 +193,17 @@ async def unlock_search(search_db_id: int) -> bool:
     )
 
 
+async def reset_user_credits(telegram_id: int) -> bool:
+    """Reset user credits for testing (sets free_searches=1, paid_searches=0)."""
+    client = get_client()
+
+    return await client.update(
+        "users",
+        {"telegram_id": telegram_id},
+        {"free_searches": 1, "paid_searches": 0}
+    )
+
+
 async def record_payment(
     telegram_id: int,
     stars_amount: int,

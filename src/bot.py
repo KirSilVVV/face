@@ -184,6 +184,19 @@ async def cmd_buy(message: Message):
     await message.answer(BUY_MESSAGE, reply_markup=get_buy_keyboard())
 
 
+@router.message(Command("reset"))
+async def cmd_reset(message: Message):
+    """Reset user credits for testing."""
+    success = await db.reset_user_credits(message.from_user.id)
+    if success:
+        await message.answer(
+            "✅ Credits reset! You now have 1 free search.\n\n"
+            "✅ Кредиты сброшены! У вас 1 бесплатный поиск."
+        )
+    else:
+        await message.answer("Failed to reset credits. / Не удалось сбросить кредиты.")
+
+
 @router.callback_query(F.data.startswith("buy_"))
 async def handle_buy(callback: CallbackQuery, bot: Bot):
     amount = int(callback.data.split("_")[1])
