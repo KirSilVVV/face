@@ -3,20 +3,17 @@ import logging
 from typing import Optional
 import httpx
 
-from src.config import VK_ACCESS_TOKEN
-
 logger = logging.getLogger(__name__)
 
-VK_API_URL = "https://api.vk.com/method"
-VK_API_VERSION = "5.131"
+# Headers to look like a browser
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+}
 
 
 def extract_vk_username(url: str) -> Optional[str]:
     """Extract username or ID from VK URL."""
-    # Patterns:
-    # vk.com/username
-    # vk.com/id123456
-    # m.vk.com/username
     patterns = [
         r'(?:https?://)?(?:m\.)?vk\.com/([a-zA-Z0-9_.]+)',
     ]
@@ -26,86 +23,56 @@ def extract_vk_username(url: str) -> Optional[str]:
         if match:
             username = match.group(1)
             # Skip service pages
-            if username in ('wall', 'photo', 'video', 'audio', 'feed', 'im', 'friends'):
+            if username in ('wall', 'photo', 'video', 'audio', 'feed', 'im', 'friends', 'groups', 'apps'):
                 return None
             return username
     return None
 
 
-async def get_vk_user_info(user_id: str) -> Optional[dict]:
-    """Get user info from VK API."""
-    if not VK_ACCESS_TOKEN:
-        logger.warning("VK_ACCESS_TOKEN not set, skipping VK lookup")
-        return None
-
-    params = {
-        "user_ids": user_id,
-        "fields": "first_name,last_name,screen_name",
-        "access_token": VK_ACCESS_TOKEN,
-        "v": VK_API_VERSION
-    }
+async def scrape_vk_name(username: str) -> Optional[str]:
+    """Scrape name from VK profile page (no API needed)."""
+    url = f"https://vk.com/{username}"
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(f"{VK_API_URL}/users.get", params=params)
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True, headers=HEADERS) as client:
+            response = await client.get(url)
 
             if response.status_code != 200:
-                logger.error(f"VK API error: {response.status_code}")
+                logger.warning(f"VK page fetch failed: {response.status_code}")
                 return None
 
-            data = response.json()
+            html = response.text
 
-            if "error" in data:
-                logger.error(f"VK API error: {data['error']}")
-                return None
+            # Try to extract name from <title> tag
+            # Format: "Имя Фамилия | ВКонтакте" or "Имя Фамилия | VK"
+            title_match = re.search(r'<title>([^|<]+)', html)
+            if title_match:
+                name = title_match.group(1).strip()
+                # Filter out non-profile pages
+                if name and name not in ('ВКонтакте', 'VK', 'Ошибка', 'Error', 'Страница удалена'):
+                    return name
 
-            users = data.get("response", [])
-            if users:
-                return users[0]
+            # Try og:title meta tag
+            og_match = re.search(r'<meta\s+property="og:title"\s+content="([^"]+)"', html)
+            if og_match:
+                name = og_match.group(1).strip()
+                if name and '|' in name:
+                    name = name.split('|')[0].strip()
+                if name and name not in ('ВКонтакте', 'VK'):
+                    return name
+
             return None
 
     except Exception as e:
-        logger.error(f"VK API request failed: {e}")
+        logger.error(f"VK scrape error for {username}: {e}")
         return None
-
-
-async def get_name_from_vk_url(url: str) -> Optional[str]:
-    """Extract name from VK profile URL."""
-    username = extract_vk_username(url)
-    if not username:
-        return None
-
-    user_info = await get_vk_user_info(username)
-    if not user_info:
-        return None
-
-    first_name = user_info.get("first_name", "")
-    last_name = user_info.get("last_name", "")
-
-    if first_name and last_name:
-        return f"{first_name} {last_name}"
-    elif first_name:
-        return first_name
-    return None
-
-
-async def extract_names_from_urls(urls: list[str]) -> dict[str, str]:
-    """Extract names from list of URLs. Returns {url: name}."""
-    names = {}
-
-    for url in urls:
-        if "vk.com" in url.lower():
-            name = await get_name_from_vk_url(url)
-            if name:
-                names[url] = name
-
-    return names
 
 
 def guess_name_from_username(username: str) -> Optional[str]:
     """Try to guess name from username patterns like ivan_petrov, ivan.petrov."""
-    # Remove common prefixes/suffixes
     clean = username.lower()
+
+    # Skip numeric IDs
     for prefix in ['id', 'club', 'public']:
         if clean.startswith(prefix) and clean[len(prefix):].isdigit():
             return None
@@ -120,3 +87,31 @@ def guess_name_from_username(username: str) -> Optional[str]:
             return " ".join(name_parts[:2])
 
     return None
+
+
+async def get_name_from_vk_url(url: str) -> Optional[str]:
+    """Extract name from VK profile URL."""
+    username = extract_vk_username(url)
+    if not username:
+        return None
+
+    # Try scraping first
+    name = await scrape_vk_name(username)
+    if name:
+        return name
+
+    # Fall back to guessing from username
+    return guess_name_from_username(username)
+
+
+async def extract_names_from_urls(urls: list[str]) -> dict[str, str]:
+    """Extract names from list of URLs. Returns {url: name}."""
+    names = {}
+
+    for url in urls:
+        if "vk.com" in url.lower():
+            name = await get_name_from_vk_url(url)
+            if name:
+                names[url] = name
+
+    return names

@@ -27,7 +27,7 @@ router = Router()
 facecheck = FaceCheckClient()
 
 # Version for debugging deployments
-BOT_VERSION = "v3.2-vk-names"
+BOT_VERSION = "v3.3-vk-scrape"
 
 # Store pending search results temporarily (search_id -> results)
 pending_results: dict[str, dict] = {}
