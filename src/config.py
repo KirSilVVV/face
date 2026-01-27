@@ -10,8 +10,8 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 FACECHECK_BASE_URL = "https://facecheck.id/api"
 
-# Paid search cost (after free trial)
-SEARCH_COST_STARS = 3
-
-# Unlock single result link cost (for free search results)
-UNLOCK_COST_STARS = 2
+# Pricing (aggressive x3 margin)
+SEARCH_COST_STARS = 75          # Single search
+SEARCH_PACK_5_STARS = 300       # 5 searches pack
+UNLOCK_SINGLE_STARS = 10        # Unlock 1 link
+UNLOCK_ALL_STARS = 35           # Unlock all 10 links

@@ -18,7 +18,10 @@ from PIL import Image, ImageFilter
 
 logger = logging.getLogger(__name__)
 
-from src.config import TELEGRAM_BOT_TOKEN, SEARCH_COST_STARS, UNLOCK_COST_STARS
+from src.config import (
+    TELEGRAM_BOT_TOKEN, SEARCH_COST_STARS, SEARCH_PACK_5_STARS,
+    UNLOCK_SINGLE_STARS, UNLOCK_ALL_STARS
+)
 from src.facecheck_client import FaceCheckClient
 from src import database as db
 from src import vk_client
@@ -27,7 +30,7 @@ router = Router()
 facecheck = FaceCheckClient()
 
 # Version for debugging deployments
-BOT_VERSION = "v3.3-vk-scrape"
+BOT_VERSION = "v4.0-new-pricing"
 
 # Store pending search results temporarily (search_id -> results)
 pending_results: dict[str, dict] = {}
@@ -38,39 +41,38 @@ pending_photos: dict[int, bytes] = {}
 # Store last search_id for each user (for /debug command)
 last_search_by_user: dict[int, str] = {}
 
-WELCOME_MESSAGE = """<b>🔍 Face Search Bot</b>
+WELCOME_MESSAGE = f"""<b>🔍 Face Search Bot</b>
 
-Send me a photo of a person and I'll search for their profiles online.
+Send me a photo and I'll find matching profiles online.
 
-<b>How it works:</b>
-1. Send a photo with a clear face
-2. First search is <b>FREE</b> (10 results, links hidden)
-3. Unlock any link for {unlock_cost} ⭐
-4. After trial: {search_cost} ⭐ per search (5 results with links)
+<b>💎 Pricing:</b>
+• First search: <b>FREE</b> (10 results, links hidden)
+• Unlock 1 link: {UNLOCK_SINGLE_STARS} ⭐
+• Unlock ALL 10 links: {UNLOCK_ALL_STARS} ⭐
+• New search: {SEARCH_COST_STARS} ⭐ (10 results with links)
+• 5 searches pack: {SEARCH_PACK_5_STARS} ⭐ (save {SEARCH_COST_STARS * 5 - SEARCH_PACK_5_STARS} ⭐)
 
 <b>Commands:</b>
-/start - Show this message
-/info - Check your status
-/debug - Show all results from last search
+/start - This message
+/buy - Purchase searches
+/info - Your credits
 
 ---
 
 <b>🔍 Бот Поиска по Лицу</b>
 
-Отправьте фото человека, и я найду его профили в интернете.
+Отправьте фото — найду профили в интернете.
 
-<b>Как это работает:</b>
-1. Отправьте фото с четким лицом
-2. Первый поиск <b>БЕСПЛАТНО</b> (10 результатов, ссылки скрыты)
-3. Открыть любую ссылку за {unlock_cost} ⭐
-4. После триала: {search_cost} ⭐ за поиск (5 результатов со ссылками)
+<b>💎 Цены:</b>
+• Первый поиск: <b>БЕСПЛАТНО</b> (10 результатов, ссылки скрыты)
+• Открыть 1 ссылку: {UNLOCK_SINGLE_STARS} ⭐
+• Открыть ВСЕ 10 ссылок: {UNLOCK_ALL_STARS} ⭐
+• Новый поиск: {SEARCH_COST_STARS} ⭐ (10 результатов со ссылками)
+• Пакет 5 поисков: {SEARCH_PACK_5_STARS} ⭐ (экономия {SEARCH_COST_STARS * 5 - SEARCH_PACK_5_STARS} ⭐)
 
 ---
 
-<i>Disclaimer: Results are based on visual similarity only. This tool cannot confirm identity. Use responsibly.</i>""".format(
-    unlock_cost=UNLOCK_COST_STARS,
-    search_cost=SEARCH_COST_STARS
-)
+<i>Results are based on visual similarity only. Use responsibly.</i>"""
 
 
 def blur_image(img_bytes: bytes, blur_radius: int = 30) -> bytes:
@@ -153,8 +155,18 @@ def get_unlock_keyboard(search_id: str, result_index: int) -> InlineKeyboardMark
     """Create keyboard to unlock a single result link."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
-            text=f"🔓 Unlock link / Открыть ссылку - {UNLOCK_COST_STARS} ⭐",
+            text=f"🔓 Unlock / Открыть - {UNLOCK_SINGLE_STARS} ⭐",
             callback_data=f"unlock_{search_id}_{result_index}"
+        )],
+    ])
+
+
+def get_unlock_all_keyboard(search_id: str) -> InlineKeyboardMarkup:
+    """Create keyboard to unlock all results at once."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=f"🔓 Unlock ALL 10 / Открыть ВСЕ 10 - {UNLOCK_ALL_STARS} ⭐",
+            callback_data=f"unlock_all_{search_id}"
         )],
     ])
 
@@ -194,21 +206,27 @@ async def cmd_info(message: Message):
 async def cmd_buy(message: Message):
     credits = await db.get_user_credits(message.from_user.id)
     free = credits.get("free_searches", 0)
+    paid = credits.get("paid_searches", 0)
 
-    if free > 0:
-        await message.answer(
-            f"You still have {free} FREE search(es)! Just send a photo.\n\n"
-            f"У вас еще есть {free} БЕСПЛАТНЫЙ поиск! Просто отправьте фото."
-        )
-    else:
-        await message.answer(
-            f"<b>Paid Search / Платный поиск</b>\n\n"
-            f"Each search costs {SEARCH_COST_STARS} ⭐\n"
-            f"You get 5 results with direct links.\n\n"
-            f"Каждый поиск стоит {SEARCH_COST_STARS} ⭐\n"
-            f"Вы получите 5 результатов с прямыми ссылками.\n\n"
-            f"Send a photo to start / Отправьте фото для начала"
-        )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=f"🔍 1 search / 1 поиск - {SEARCH_COST_STARS} ⭐",
+            callback_data="buy_1_search"
+        )],
+        [InlineKeyboardButton(
+            text=f"🎁 5 searches / 5 поисков - {SEARCH_PACK_5_STARS} ⭐ (save {SEARCH_COST_STARS * 5 - SEARCH_PACK_5_STARS} ⭐)",
+            callback_data="buy_5_searches"
+        )],
+    ])
+
+    await message.answer(
+        f"<b>💎 Buy Searches / Купить поиски</b>\n\n"
+        f"Your credits: {free + paid} ({free} free + {paid} paid)\n"
+        f"Ваши кредиты: {free + paid} ({free} бесп. + {paid} платн.)\n\n"
+        f"Each search gives 10 results with links.\n"
+        f"Каждый поиск даёт 10 результатов со ссылками.",
+        reply_markup=keyboard
+    )
 
 
 @router.message(Command("reset"))
@@ -288,7 +306,7 @@ async def handle_paid_search_request(callback: CallbackQuery, bot: Bot):
     await bot.send_invoice(
         chat_id=callback.from_user.id,
         title="Face Search / Поиск по лицу",
-        description=f"Search for face matches (5 results with links) / Поиск совпадений (5 результатов со ссылками)",
+        description="10 results with links / 10 результатов со ссылками",
         payload="paid_search",
         currency="XTR",
         prices=[LabeledPrice(label="Face Search", amount=SEARCH_COST_STARS)],
@@ -296,8 +314,55 @@ async def handle_paid_search_request(callback: CallbackQuery, bot: Bot):
     await callback.answer()
 
 
+@router.callback_query(F.data == "buy_1_search")
+async def handle_buy_1_search(callback: CallbackQuery, bot: Bot):
+    """Buy 1 search credit."""
+    await bot.send_invoice(
+        chat_id=callback.from_user.id,
+        title="1 Search / 1 Поиск",
+        description="10 results with links / 10 результатов со ссылками",
+        payload="buy_1_search",
+        currency="XTR",
+        prices=[LabeledPrice(label="1 Search", amount=SEARCH_COST_STARS)],
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "buy_5_searches")
+async def handle_buy_5_searches(callback: CallbackQuery, bot: Bot):
+    """Buy 5 searches pack."""
+    await bot.send_invoice(
+        chat_id=callback.from_user.id,
+        title="5 Searches Pack / Пакет 5 поисков",
+        description=f"50 results total, save {SEARCH_COST_STARS * 5 - SEARCH_PACK_5_STARS} ⭐ / Всего 50 результатов, экономия {SEARCH_COST_STARS * 5 - SEARCH_PACK_5_STARS} ⭐",
+        payload="buy_5_searches",
+        currency="XTR",
+        prices=[LabeledPrice(label="5 Searches", amount=SEARCH_PACK_5_STARS)],
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("unlock_all_"))
+async def handle_unlock_all(callback: CallbackQuery, bot: Bot):
+    """Unlock all 10 results at once."""
+    search_id = callback.data.replace("unlock_all_", "")
+    await bot.send_invoice(
+        chat_id=callback.from_user.id,
+        title="Unlock All 10 / Открыть все 10",
+        description="Get all 10 source links / Получить все 10 ссылок",
+        payload=f"unlock_all_{search_id}",
+        currency="XTR",
+        prices=[LabeledPrice(label="Unlock All", amount=UNLOCK_ALL_STARS)],
+    )
+    await callback.answer()
+
+
 @router.callback_query(F.data.startswith("unlock_"))
 async def handle_unlock(callback: CallbackQuery, bot: Bot):
+    # Skip if it's unlock_all (handled separately)
+    if callback.data.startswith("unlock_all_"):
+        return
+
     parts = callback.data.split("_")
     search_id = parts[1]
     result_index = int(parts[2])
@@ -306,10 +371,10 @@ async def handle_unlock(callback: CallbackQuery, bot: Bot):
     await bot.send_invoice(
         chat_id=callback.from_user.id,
         title="Unlock Link / Открыть ссылку",
-        description="Get the source link for this face match / Получить ссылку на источник",
+        description="Get the source link / Получить ссылку",
         payload=f"unlock_{search_id}_{result_index}",
         currency="XTR",
-        prices=[LabeledPrice(label="Unlock link", amount=UNLOCK_COST_STARS)],
+        prices=[LabeledPrice(label="Unlock link", amount=UNLOCK_SINGLE_STARS)],
     )
     await callback.answer()
 
@@ -340,12 +405,58 @@ async def handle_successful_payment(message: Message, bot: Bot):
         image_bytes = pending_photos.pop(user_id)
         await execute_paid_search(message, bot, image_bytes)
 
+    elif payload == "buy_1_search":
+        # Add 1 search credit
+        await db.add_paid_searches(user_id, 1)
+        await db.record_payment(user_id, stars, 1, payment_id)
+        await message.answer(
+            "✅ <b>1 search added!</b>\n"
+            "Send a photo to start.\n\n"
+            "✅ <b>1 поиск добавлен!</b>\n"
+            "Отправьте фото для начала."
+        )
+
+    elif payload == "buy_5_searches":
+        # Add 5 search credits
+        await db.add_paid_searches(user_id, 5)
+        await db.record_payment(user_id, stars, 5, payment_id)
+        await message.answer(
+            "✅ <b>5 searches added!</b>\n"
+            "Send a photo to start.\n\n"
+            "✅ <b>5 поисков добавлено!</b>\n"
+            "Отправьте фото для начала."
+        )
+
+    elif payload.startswith("unlock_all_"):
+        search_id = payload.replace("unlock_all_", "")
+
+        if search_id in pending_results:
+            results = pending_results[search_id]
+            faces = results.get("output", {}).get("items", [])[:10]
+
+            lines = ["🔓 <b>All Links Unlocked / Все ссылки открыты</b>\n"]
+            for i, face in enumerate(faces, 1):
+                score = face.get("score", 0)
+                url = face.get("url", "N/A")
+                lines.append(f"{i}. [{score}%] {url}")
+
+            await message.answer(
+                "\n".join(lines),
+                link_preview_options=LinkPreviewOptions(is_disabled=True)
+            )
+        else:
+            await message.answer(
+                "Results expired. Please do a new search.\n\n"
+                "Результаты устарели. Сделайте новый поиск."
+            )
+
+        await db.record_payment(user_id, stars, 0, payment_id)
+
     elif payload.startswith("unlock_"):
         parts = payload.split("_")
         search_id = parts[1]
         result_index = int(parts[2])
 
-        # Get stored results
         if search_id in pending_results:
             results = pending_results[search_id]
             faces = results.get("output", {}).get("items", [])
@@ -406,7 +517,7 @@ async def execute_paid_search(message: Message, bot: Bot, image_bytes: bytes):
         f"<b>✅ Search Complete / Поиск завершен</b>\n\n"
         f"Faces scanned: {searched_str}\n"
         f"Time: {took_sec:.1f}s\n"
-        f"Results: {min(len(faces), 5)}\n"
+        f"Results: {min(len(faces), 10)}\n"
     )
 
     if not faces:
@@ -420,8 +531,8 @@ async def execute_paid_search(message: Message, bot: Bot, image_bytes: bytes):
 
     await status_msg.edit_text(stats + "\nSending results... / Отправка результатов...")
 
-    # Paid search: show 5 results with links
-    for i, face in enumerate(faces[:5], 1):
+    # Paid search: show 10 results with links
+    for i, face in enumerate(faces[:10], 1):
         score = face.get("score", 0)
         url = face.get("url", "N/A")
 
@@ -445,7 +556,7 @@ async def execute_paid_search(message: Message, bot: Bot, image_bytes: bytes):
     await status_msg.delete()
 
     # Extract and show names from VK profiles
-    names = await extract_names_from_results(faces[:5])
+    names = await extract_names_from_results(faces[:10])
     await send_name_summary(message, names)
 
 
@@ -474,7 +585,7 @@ async def handle_photo(message: Message, bot: Bot):
         await bot.send_invoice(
             chat_id=message.from_user.id,
             title="Face Search / Поиск по лицу",
-            description=f"Search for face matches (5 results with links)\nПоиск совпадений (5 результатов со ссылками)",
+            description="10 results with links / 10 результатов со ссылками",
             payload="paid_search",
             currency="XTR",
             prices=[LabeledPrice(label="Face Search", amount=SEARCH_COST_STARS)],
@@ -533,8 +644,8 @@ async def execute_free_search(message: Message, bot: Bot, image_bytes: bytes):
     last_search_by_user[message.from_user.id] = search_id
 
     await status_msg.edit_text(
-        stats + f"\n<i>🔒 Links are hidden. Unlock each for {UNLOCK_COST_STARS} ⭐\n"
-        f"Ссылки скрыты. Открыть каждую за {UNLOCK_COST_STARS} ⭐</i>"
+        stats + f"\n<i>🔒 Links hidden. Unlock 1 for {UNLOCK_SINGLE_STARS} ⭐ or ALL for {UNLOCK_ALL_STARS} ⭐\n"
+        f"Ссылки скрыты. Открыть 1 за {UNLOCK_SINGLE_STARS} ⭐ или ВСЕ за {UNLOCK_ALL_STARS} ⭐</i>"
     )
 
     # Free search: show 10 results with hidden links
@@ -557,6 +668,13 @@ async def execute_free_search(message: Message, bot: Bot, image_bytes: bytes):
                 await message.answer(caption, reply_markup=get_unlock_keyboard(search_id, i - 1))
         else:
             await message.answer(caption, reply_markup=get_unlock_keyboard(search_id, i - 1))
+
+    # Add "Unlock All" button
+    await message.answer(
+        f"💡 <b>Tip:</b> Unlock all 10 links at once for {UNLOCK_ALL_STARS} ⭐ (save {UNLOCK_SINGLE_STARS * 10 - UNLOCK_ALL_STARS} ⭐)\n\n"
+        f"💡 <b>Совет:</b> Откройте все 10 ссылок сразу за {UNLOCK_ALL_STARS} ⭐ (экономия {UNLOCK_SINGLE_STARS * 10 - UNLOCK_ALL_STARS} ⭐)",
+        reply_markup=get_unlock_all_keyboard(search_id)
+    )
 
     # Extract and show names from VK profiles
     names = await extract_names_from_results(faces[:10])
