@@ -72,7 +72,17 @@ Send me a photo and I'll find matching profiles online.
 
 ---
 
-<i>Results are based on visual similarity only. Use responsibly.</i>"""
+<b>⚠️ Important:</b>
+• Only public sources are searched
+• Results are potential matches, not identity confirmation
+• Only use with consent of the person in the photo
+• Images are not stored after processing
+
+<b>⚠️ Важно:</b>
+• Бот работает только с публичными источниками
+• Результаты — предположительные совпадения, не подтверждение личности
+• Используйте только с согласия человека на фото
+• Изображения не сохраняются после обработки"""
 
 
 def blur_image(img_bytes: bytes, blur_radius: int = 30) -> bytes:
