@@ -33,14 +33,8 @@ facecheck = FaceCheckClient()
 # Version for debugging deployments
 BOT_VERSION = "v4.0-new-pricing"
 
-# Track if low balance alert was already sent (to avoid spam)
-_low_balance_alert_sent = False
-
-
 async def check_api_balance_and_alert(bot: Bot):
-    """Check FaceCheck API balance and send alert if low."""
-    global _low_balance_alert_sent
-
+    """Check FaceCheck API balance and send notification after each search."""
     if not ADMIN_CHAT_ID:
         return
 
@@ -51,19 +45,17 @@ async def check_api_balance_and_alert(bot: Bot):
 
         remaining = info.get('remaining_credits', 0)
 
-        if remaining <= API_BALANCE_ALERT_THRESHOLD and not _low_balance_alert_sent:
-            await bot.send_message(
-                chat_id=ADMIN_CHAT_ID,
-                text=f"⚠️ <b>Внимание! Низкий баланс FaceCheck API</b>\n\n"
-                     f"Осталось кредитов: <b>{remaining}</b>\n"
-                     f"Порог алерта: {API_BALANCE_ALERT_THRESHOLD}\n\n"
-                     f"Пополните баланс на facecheck.id"
-            )
-            _low_balance_alert_sent = True
-            logger.warning(f"Low API balance alert sent: {remaining} credits remaining")
+        # Always notify about remaining balance
+        warning = ""
+        if remaining <= API_BALANCE_ALERT_THRESHOLD:
+            warning = "\n\n⚠️ <b>НИЗКИЙ БАЛАНС! Пополните на facecheck.id</b>"
 
-        elif remaining > API_BALANCE_ALERT_THRESHOLD:
-            _low_balance_alert_sent = False  # Reset flag when balance is OK
+        await bot.send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text=f"🔍 Поиск выполнен\n"
+                 f"Осталось кредитов API: <b>{remaining}</b>{warning}"
+        )
+        logger.info(f"Balance notification sent: {remaining} credits remaining")
 
     except Exception as e:
         logger.error(f"Balance check error: {e}")
