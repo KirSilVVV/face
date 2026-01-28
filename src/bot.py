@@ -20,7 +20,8 @@ logger = logging.getLogger(__name__)
 
 from src.config import (
     TELEGRAM_BOT_TOKEN, SEARCH_COST_STARS, SEARCH_PACK_5_STARS,
-    UNLOCK_SINGLE_STARS, UNLOCK_ALL_STARS
+    UNLOCK_SINGLE_STARS, UNLOCK_ALL_STARS, ADMIN_CHAT_ID,
+    API_BALANCE_ALERT_THRESHOLD
 )
 from src.facecheck_client import FaceCheckClient
 from src import database as db
@@ -31,6 +32,41 @@ facecheck = FaceCheckClient()
 
 # Version for debugging deployments
 BOT_VERSION = "v4.0-new-pricing"
+
+# Track if low balance alert was already sent (to avoid spam)
+_low_balance_alert_sent = False
+
+
+async def check_api_balance_and_alert(bot: Bot):
+    """Check FaceCheck API balance and send alert if low."""
+    global _low_balance_alert_sent
+
+    if not ADMIN_CHAT_ID:
+        return
+
+    try:
+        info = await facecheck.get_info()
+        if not info:
+            return
+
+        remaining = info.get('remaining_credits', 0)
+
+        if remaining <= API_BALANCE_ALERT_THRESHOLD and not _low_balance_alert_sent:
+            await bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=f"⚠️ <b>Внимание! Низкий баланс FaceCheck API</b>\n\n"
+                     f"Осталось кредитов: <b>{remaining}</b>\n"
+                     f"Порог алерта: {API_BALANCE_ALERT_THRESHOLD}\n\n"
+                     f"Пополните баланс на facecheck.id"
+            )
+            _low_balance_alert_sent = True
+            logger.warning(f"Low API balance alert sent: {remaining} credits remaining")
+
+        elif remaining > API_BALANCE_ALERT_THRESHOLD:
+            _low_balance_alert_sent = False  # Reset flag when balance is OK
+
+    except Exception as e:
+        logger.error(f"Balance check error: {e}")
 
 # Store pending search results temporarily (search_id -> results)
 pending_results: dict[str, dict] = {}
@@ -536,6 +572,9 @@ async def execute_paid_search(message: Message, bot: Bot, image_bytes: bytes):
     names = await extract_names_from_results(faces[:10])
     await send_name_summary(message, names)
 
+    # Check API balance and alert if low
+    await check_api_balance_and_alert(bot)
+
 
 @router.message(F.photo)
 async def handle_photo(message: Message, bot: Bot):
@@ -654,6 +693,9 @@ async def execute_free_search(message: Message, bot: Bot, image_bytes: bytes):
     # Extract and show names from VK profiles
     names = await extract_names_from_results(faces[:10])
     await send_name_summary(message, names)
+
+    # Check API balance and alert if low
+    await check_api_balance_and_alert(bot)
 
 
 @router.message()
