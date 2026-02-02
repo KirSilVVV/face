@@ -23,17 +23,19 @@ logger = logging.getLogger(__name__)
 from src.config import (
     TELEGRAM_BOT_TOKEN, SEARCH_COST_STARS, SEARCH_PACK_5_STARS,
     UNLOCK_SINGLE_STARS, UNLOCK_ALL_STARS, ADMIN_CHAT_ID,
-    API_BALANCE_ALERT_THRESHOLD
+    API_BALANCE_ALERT_THRESHOLD, VK_SEARCH_COST_STARS
 )
 from src.facecheck_client import FaceCheckClient
+from src.search4faces_client import Search4FacesClient
 from src import database as db
 from src import vk_client
 
 router = Router()
 facecheck = FaceCheckClient()
+search4faces = Search4FacesClient()
 
 # Version for debugging deployments
-BOT_VERSION = "v5.0-conversion-boost"
+BOT_VERSION = "v6.0-vk-search"
 
 async def check_api_balance_and_alert(bot: Bot):
     """Check FaceCheck API balance and send notification after each search."""
@@ -142,13 +144,13 @@ def is_result_expired(search_id: str) -> bool:
 
 WELCOME_MESSAGE = f"""<b>🔍 Бот Поиска по Лицу</b>
 
-Отправьте фото — найду профили в интернете.
+Отправьте фото — найду профили в интернете или ВКонтакте.
 
 <b>💰 Цены:</b>
 • Первый поиск: <b>БЕСПЛАТНО</b> ({FREE_RESULTS_COUNT} результата)
 • Разблокировать все: <b>{UNLOCK_ALL_STARS} ⭐</b>
-• Полный поиск: <b>{SEARCH_COST_STARS} ⭐</b> (10 результатов + ссылки)
-• 5 поисков: <b>{SEARCH_PACK_5_STARS} ⭐</b> (экономия {SEARCH_COST_STARS * 5 - SEARCH_PACK_5_STARS} ⭐)
+• Поиск по интернету: <b>{SEARCH_COST_STARS} ⭐</b>
+• Поиск по VK: <b>{VK_SEARCH_COST_STARS} ⭐</b>
 
 ⏰ <i>Результаты действуют 30 минут</i>
 
@@ -158,6 +160,20 @@ WELCOME_MESSAGE = f"""<b>🔍 Бот Поиска по Лицу</b>
 /stars — Купить звёзды дешевле
 
 <i>Данные из открытых источников. Фото не сохраняются.</i>"""
+
+
+def get_search_source_keyboard() -> InlineKeyboardMarkup:
+    """Create keyboard for selecting search source."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="🌐 Интернет (все сайты)",
+            callback_data="source_internet"
+        )],
+        [InlineKeyboardButton(
+            text="📱 ВКонтакте",
+            callback_data="source_vk"
+        )],
+    ])
 
 
 def blur_image(img_bytes: bytes, blur_radius: int = 30) -> bytes:
@@ -483,6 +499,70 @@ async def handle_buy_5_searches(callback: CallbackQuery, bot: Bot):
     await callback.answer()
 
 
+@router.callback_query(F.data == "source_internet")
+async def handle_source_internet(callback: CallbackQuery, bot: Bot):
+    """Пользователь выбрал поиск по интернету."""
+    user_id = callback.from_user.id
+
+    if user_id not in pending_photos:
+        await callback.answer("Фото не найдено. Отправьте новое фото.", show_alert=True)
+        return
+
+    image_bytes = pending_photos[user_id]
+    credits = await db.get_user_credits(user_id)
+    free_searches = credits.get("free_searches", 0)
+
+    await callback.answer()
+
+    if free_searches > 0:
+        # Бесплатный поиск
+        pending_photos.pop(user_id, None)
+        await execute_free_search(callback.message, bot, image_bytes)
+    else:
+        # Платный поиск - отправляем инвойс
+        await db.track_event(user_id, "payment_clicked", {"type": "internet_search"})
+        await bot.send_invoice(
+            chat_id=user_id,
+            title="Поиск по интернету",
+            description="10 результатов со ссылками со всего интернета",
+            payload="paid_search_internet",
+            currency="XTR",
+            prices=[LabeledPrice(label="Поиск по интернету", amount=SEARCH_COST_STARS)],
+        )
+
+
+@router.callback_query(F.data == "source_vk")
+async def handle_source_vk(callback: CallbackQuery, bot: Bot):
+    """Пользователь выбрал поиск по VK."""
+    user_id = callback.from_user.id
+
+    if user_id not in pending_photos:
+        await callback.answer("Фото не найдено. Отправьте новое фото.", show_alert=True)
+        return
+
+    image_bytes = pending_photos[user_id]
+    credits = await db.get_user_credits(user_id)
+    free_searches = credits.get("free_searches", 0)
+
+    await callback.answer()
+
+    if free_searches > 0:
+        # Бесплатный поиск по VK
+        pending_photos.pop(user_id, None)
+        await execute_free_vk_search(callback.message, bot, image_bytes)
+    else:
+        # Платный поиск VK - отправляем инвойс
+        await db.track_event(user_id, "payment_clicked", {"type": "vk_search"})
+        await bot.send_invoice(
+            chat_id=user_id,
+            title="Поиск по ВКонтакте",
+            description="10 результатов профилей VK",
+            payload="paid_search_vk",
+            currency="XTR",
+            prices=[LabeledPrice(label="Поиск по VK", amount=VK_SEARCH_COST_STARS)],
+        )
+
+
 @router.callback_query(F.data.startswith("unlock_all_"))
 async def handle_unlock_all(callback: CallbackQuery, bot: Bot):
     """Разблокировать все 10 результатов сразу."""
@@ -538,8 +618,8 @@ async def handle_successful_payment(message: Message, bot: Bot):
     # Отслеживаем событие оплаты
     await db.track_event(user_id, "payment_completed", {"type": payload, "stars": stars})
 
-    if payload == "paid_search":
-        # Пользователь оплатил поиск — выполняем его
+    if payload == "paid_search" or payload == "paid_search_internet":
+        # Пользователь оплатил поиск по интернету — выполняем его
         await db.record_payment(user_id, stars, 1, payment_id)
 
         if user_id not in pending_photos:
@@ -550,6 +630,19 @@ async def handle_successful_payment(message: Message, bot: Bot):
 
         image_bytes = pending_photos.pop(user_id)
         await execute_paid_search(message, bot, image_bytes)
+
+    elif payload == "paid_search_vk":
+        # Пользователь оплатил поиск по VK — выполняем его
+        await db.record_payment(user_id, stars, 1, payment_id)
+
+        if user_id not in pending_photos:
+            await message.answer(
+                "Оплата получена, но фото не найдено. Отправьте новое фото."
+            )
+            return
+
+        image_bytes = pending_photos.pop(user_id)
+        await execute_paid_vk_search(message, bot, image_bytes)
 
     elif payload == "buy_1_search":
         # Добавляем 1 поиск
@@ -580,13 +673,28 @@ async def handle_successful_payment(message: Message, bot: Bot):
         if search_id in pending_results and not is_result_expired(search_id):
             results = pending_results[search_id]
             results["_unlocked"] = True  # Помечаем как разблокированные
-            faces = results.get("output", {}).get("items", [])[:10]
 
-            lines = ["🔓 <b>Все ссылки открыты!</b>\n"]
-            for i, face in enumerate(faces, 1):
-                score = face.get("score", 0)
-                url = face.get("url", "N/A")
-                lines.append(f"{i}. [{score}%] {url}")
+            # Проверяем источник результатов (VK или интернет)
+            if results.get("_source") == "vk":
+                # VK результаты
+                profiles = results.get("profiles", [])[:10]
+                lines = ["🔓 <b>Все профили VK открыты!</b>\n"]
+                for i, p in enumerate(profiles, 1):
+                    score = p.get("score", 0)
+                    first = p.get("first", "")
+                    last = p.get("last", "")
+                    vk_id = p.get("id", "")
+                    name = f"{first} {last}".strip() or "Без имени"
+                    url = f"https://vk.com/id{vk_id}" if vk_id else "N/A"
+                    lines.append(f"{i}. [{score}%] {name}\n   {url}")
+            else:
+                # Интернет результаты
+                faces = results.get("output", {}).get("items", [])[:10]
+                lines = ["🔓 <b>Все ссылки открыты!</b>\n"]
+                for i, face in enumerate(faces, 1):
+                    score = face.get("score", 0)
+                    url = face.get("url", "N/A")
+                    lines.append(f"{i}. [{score}%] {url}")
 
             await message.answer(
                 "\n".join(lines),
@@ -614,23 +722,49 @@ async def handle_successful_payment(message: Message, bot: Bot):
 
     elif payload.startswith("unlock_"):
         parts = payload.split("_")
-        search_id = parts[1]
-        result_index = int(parts[2])
+        # Для VK: unlock_vk_123_0, для интернета: unlock_123_0
+        if parts[1] == "vk":
+            search_id = f"vk_{parts[2]}"
+            result_index = int(parts[3])
+        else:
+            search_id = parts[1]
+            result_index = int(parts[2])
 
         if search_id in pending_results and not is_result_expired(search_id):
             results = pending_results[search_id]
-            faces = results.get("output", {}).get("items", [])
 
-            if result_index < len(faces):
-                face = faces[result_index]
-                url = face.get("url", "N/A")
+            if results.get("_source") == "vk":
+                # VK результаты
+                profiles = results.get("profiles", [])
+                if result_index < len(profiles):
+                    p = profiles[result_index]
+                    score = p.get("score", 0)
+                    first = p.get("first", "")
+                    last = p.get("last", "")
+                    vk_id = p.get("id", "")
+                    name = f"{first} {last}".strip() or "Без имени"
+                    url = f"https://vk.com/id{vk_id}" if vk_id else "N/A"
 
-                await message.answer(
-                    f"🔓 <b>Ссылка открыта!</b>\n\n"
-                    f"Совпадение: {face.get('score', 0)}%\n"
-                    f"🔗 {url}",
-                    link_preview_options=LinkPreviewOptions(is_disabled=True)
-                )
+                    await message.answer(
+                        f"🔓 <b>Профиль VK открыт!</b>\n\n"
+                        f"Совпадение: {score}%\n"
+                        f"👤 {name}\n"
+                        f"🔗 {url}",
+                        link_preview_options=LinkPreviewOptions(is_disabled=True)
+                    )
+            else:
+                # Интернет результаты
+                faces = results.get("output", {}).get("items", [])
+                if result_index < len(faces):
+                    face = faces[result_index]
+                    url = face.get("url", "N/A")
+
+                    await message.answer(
+                        f"🔓 <b>Ссылка открыта!</b>\n\n"
+                        f"Совпадение: {face.get('score', 0)}%\n"
+                        f"🔗 {url}",
+                        link_preview_options=LinkPreviewOptions(is_disabled=True)
+                    )
         else:
             await message.answer(
                 "⏰ <b>Результаты истекли!</b>\n\n"
@@ -740,29 +874,34 @@ async def handle_photo(message: Message, bot: Bot):
     # Проверяем ежедневный бесплатный поиск
     await db.check_and_grant_daily_free_search(message.from_user.id)
 
-    credits = await db.get_user_credits(message.from_user.id)
-    free_searches = credits.get("free_searches", 0)
-
     # Скачиваем фото
     photo = message.photo[-1]
     file = await bot.get_file(photo.file_id)
     image_data = await bot.download_file(file.file_path)
     image_bytes = image_data.read()
 
+    # Сохраняем фото для последующего поиска
+    pending_photos[message.from_user.id] = image_bytes
+
+    # Показываем выбор источника поиска
+    credits = await db.get_user_credits(message.from_user.id)
+    free_searches = credits.get("free_searches", 0)
+
     if free_searches > 0:
-        # БЕСПЛАТНЫЙ ПОИСК: 3 результата со скрытыми ссылками
-        await execute_free_search(message, bot, image_bytes)
-    else:
-        # ПЛАТНЫЙ ПОИСК: Сохраняем фото и запрашиваем оплату
-        pending_photos[message.from_user.id] = image_bytes
-        await bot.send_invoice(
-            chat_id=message.from_user.id,
-            title="Поиск по лицу",
-            description="10 результатов со ссылками",
-            payload="paid_search",
-            currency="XTR",
-            prices=[LabeledPrice(label="Поиск по лицу", amount=SEARCH_COST_STARS)],
+        text = (
+            "📸 <b>Фото получено!</b>\n\n"
+            f"У вас <b>{free_searches}</b> бесплатный поиск.\n"
+            "Выберите где искать:"
         )
+    else:
+        text = (
+            "📸 <b>Фото получено!</b>\n\n"
+            "Выберите где искать:\n"
+            f"• Интернет — <b>{SEARCH_COST_STARS} ⭐</b>\n"
+            f"• ВКонтакте — <b>{VK_SEARCH_COST_STARS} ⭐</b>"
+        )
+
+    await message.answer(text, reply_markup=get_search_source_keyboard())
 
 
 async def execute_free_search(message: Message, bot: Bot, image_bytes: bytes):
@@ -886,6 +1025,204 @@ async def execute_free_search(message: Message, bot: Bot, image_bytes: bytes):
 
     # Проверяем баланс API и оповещаем если низкий
     await check_api_balance_and_alert(bot)
+
+
+async def execute_free_vk_search(message: Message, bot: Bot, image_bytes: bytes):
+    """Бесплатный поиск по VK: показываем 3 результата со скрытыми ссылками."""
+    status_msg = await message.answer("🔍 Поиск по VK...")
+
+    last_progress_text = ""
+
+    async def on_progress(progress: int):
+        nonlocal last_progress_text
+        new_text = f"🔍 Поиск по VK... {progress}%"
+        if new_text != last_progress_text:
+            try:
+                await status_msg.edit_text(new_text)
+                last_progress_text = new_text
+            except TelegramBadRequest:
+                pass
+
+    result = await search4faces.search_vk(image_bytes, source="vk_wall", results_count=10, on_progress=on_progress)
+
+    if not result:
+        await status_msg.edit_text("Ошибка поиска. Попробуйте снова.")
+        return
+
+    if result.get("error"):
+        await status_msg.edit_text(f"Ошибка: {result['error']}")
+        return
+
+    # Используем бесплатный поиск
+    await db.use_search(message.chat.id)
+
+    profiles = result.get("profiles", [])
+
+    stats = (
+        f"<b>✅ Поиск по VK завершён</b>\n\n"
+        f"Результатов: {len(profiles)}\n"
+    )
+
+    if not profiles:
+        await status_msg.edit_text(stats + "\n<i>Совпадений не найдено.</i>")
+        return
+
+    # Сохраняем результаты с timestamp
+    search_id = f"vk_{message.message_id}"
+    vk_result = {
+        "profiles": profiles,
+        "_created_at": time.time(),
+        "_source": "vk"
+    }
+    pending_results[search_id] = vk_result
+    last_search_by_user[message.chat.id] = search_id
+
+    total_results = min(len(profiles), 10)
+    hidden_count = total_results - FREE_RESULTS_COUNT
+
+    await status_msg.edit_text(
+        stats +
+        f"\n⏰ <b>Результаты действуют 30 минут!</b>\n"
+        f"<i>🔒 Показано {FREE_RESULTS_COUNT} из {total_results}. "
+        f"Разблокируйте все за {UNLOCK_ALL_STARS} ⭐</i>"
+    )
+
+    # Показываем FREE_RESULTS_COUNT результатов
+    for i, profile in enumerate(profiles[:FREE_RESULTS_COUNT], 1):
+        score = profile.get("score", 0)
+        first_name = profile.get("first", "")
+        last_name = profile.get("last", "")
+        name = f"{first_name} {last_name}".strip() or "Имя скрыто"
+
+        caption = f"<b>#{i}</b> — Совпадение: {score}%\n👤 {mask_name(name)}\n🔒 <i>Ссылка скрыта</i>"
+
+        # Пробуем загрузить фото профиля
+        photo_url = profile.get("photo")
+        img_bytes = None
+        if photo_url:
+            img_bytes = await fetch_image_from_url(photo_url)
+
+        if img_bytes:
+            try:
+                photo_file = BufferedInputFile(img_bytes, filename=f"vk_{i}.jpg")
+                await message.answer_photo(
+                    photo_file,
+                    caption=caption,
+                    reply_markup=get_unlock_keyboard(search_id, i - 1)
+                )
+            except Exception as e:
+                logger.error(f"Send VK photo error: {e}")
+                await message.answer(caption, reply_markup=get_unlock_keyboard(search_id, i - 1))
+        else:
+            await message.answer(caption, reply_markup=get_unlock_keyboard(search_id, i - 1))
+
+    # Тизер скрытых результатов
+    if hidden_count > 0:
+        await message.answer(
+            f"➕ <b>Ещё {hidden_count} профилей VK скрыто</b>\n"
+            f"<i>Разблокируйте чтобы увидеть!</i>"
+        )
+
+    # Кнопка "Открыть все"
+    await message.answer(
+        f"🔥 <b>Разблокировать все {total_results} профилей VK</b> — всего <b>{UNLOCK_ALL_STARS} ⭐</b>\n\n"
+        f"⏰ <b>Результаты исчезнут через 30 мин!</b>",
+        reply_markup=get_unlock_all_keyboard(search_id)
+    )
+
+    # Отслеживаем событие
+    await db.track_event(message.chat.id, "search_completed", {"type": "free_vk", "results": total_results})
+
+    # Напоминание
+    reminder_task = asyncio.create_task(
+        schedule_expiry_reminder(bot, message.chat.id, search_id)
+    )
+    pending_reminders[search_id] = reminder_task
+
+
+async def execute_paid_vk_search(message: Message, bot: Bot, image_bytes: bytes):
+    """Платный поиск по VK: показываем 10 результатов со ссылками."""
+    status_msg = await message.answer("🔍 Поиск по VK...")
+
+    last_progress_text = ""
+
+    async def on_progress(progress: int):
+        nonlocal last_progress_text
+        new_text = f"🔍 Поиск по VK... {progress}%"
+        if new_text != last_progress_text:
+            try:
+                await status_msg.edit_text(new_text)
+                last_progress_text = new_text
+            except TelegramBadRequest:
+                pass
+
+    result = await search4faces.search_vk(image_bytes, source="vk_wall", results_count=10, on_progress=on_progress)
+
+    if not result:
+        await status_msg.edit_text("Ошибка поиска. Попробуйте снова.")
+        return
+
+    if result.get("error"):
+        await status_msg.edit_text(f"Ошибка: {result['error']}")
+        return
+
+    profiles = result.get("profiles", [])
+
+    stats = (
+        f"<b>✅ Поиск по VK завершён</b>\n\n"
+        f"Результатов: {min(len(profiles), 10)}\n"
+    )
+
+    if not profiles:
+        await status_msg.edit_text(stats + "\n<i>Совпадений не найдено.</i>")
+        return
+
+    # Сохраняем результаты
+    search_id = f"vk_{message.message_id}"
+    vk_result = {
+        "profiles": profiles,
+        "_created_at": time.time(),
+        "_source": "vk"
+    }
+    pending_results[search_id] = vk_result
+    last_search_by_user[message.from_user.id] = search_id
+
+    await status_msg.edit_text(stats + "\nОтправка результатов...")
+
+    # Показываем 10 результатов со ссылками
+    for i, profile in enumerate(profiles[:10], 1):
+        score = profile.get("score", 0)
+        first_name = profile.get("first", "")
+        last_name = profile.get("last", "")
+        vk_id = profile.get("id", "")
+        name = f"{first_name} {last_name}".strip() or "Без имени"
+        vk_url = f"https://vk.com/id{vk_id}" if vk_id else "N/A"
+
+        caption = f"<b>#{i}</b> — Совпадение: {score}%\n👤 {name}\n🔗 {vk_url}"
+
+        photo_url = profile.get("photo")
+        img_bytes = None
+        if photo_url:
+            img_bytes = await fetch_image_from_url(photo_url)
+
+        if img_bytes:
+            try:
+                photo_file = BufferedInputFile(img_bytes, filename=f"vk_{i}.jpg")
+                await message.answer_photo(
+                    photo_file,
+                    caption=caption,
+                    link_preview_options=LinkPreviewOptions(is_disabled=True)
+                )
+            except Exception as e:
+                logger.error(f"Send VK photo error: {e}")
+                await message.answer(caption, link_preview_options=LinkPreviewOptions(is_disabled=True))
+        else:
+            await message.answer(caption, link_preview_options=LinkPreviewOptions(is_disabled=True))
+
+    await status_msg.delete()
+
+    # Отслеживаем событие
+    await db.track_event(message.from_user.id, "search_completed", {"type": "paid_vk", "results": min(len(profiles), 10)})
 
 
 @router.message()

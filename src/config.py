@@ -5,11 +5,15 @@ load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 FACECHECK_API_KEY = os.getenv("FACECHECK_API_KEY")
+SEARCH4FACES_API_KEY = os.getenv("SEARCH4FACES_API_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")  # Your Telegram ID for alerts
 
 FACECHECK_BASE_URL = "https://facecheck.id/api"
+
+# VK search pricing (search4faces.com)
+VK_SEARCH_COST_STARS = 50  # VK search cheaper than internet search
 
 # Pricing (aggressive x3 margin)
 SEARCH_COST_STARS = 75          # Single search
