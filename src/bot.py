@@ -211,13 +211,20 @@ def blur_image(img_bytes: bytes, blur_radius: int = 30) -> bytes:
 
 async def fetch_image_from_url(url: str) -> bytes | None:
     """Fetch image from URL."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+        "Referer": "https://vk.com/",
+    }
     try:
         async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-            response = await client.get(url)
+            response = await client.get(url, headers=headers)
             if response.status_code == 200:
                 content_type = response.headers.get("content-type", "")
                 if "image" in content_type or url.lower().endswith(('.jpg', '.jpeg', '.png', '.webp', '.gif')):
                     return response.content
+            else:
+                logger.warning(f"Failed to fetch image: {response.status_code} from {url[:50]}...")
     except Exception as e:
         logger.error(f"Failed to fetch image from {url}: {e}")
     return None
@@ -1212,6 +1219,11 @@ async def execute_free_vk_search(message: Message, bot: Bot, image_bytes: bytes)
 
     profiles = result.get("profiles", [])
 
+    # Debug: log first profile structure
+    if profiles:
+        logger.info(f"VK free search result keys: {profiles[0].keys()}")
+        logger.info(f"First profile: {profiles[0]}")
+
     stats = (
         f"<b>✅ Поиск по VK завершён</b>\n\n"
         f"Результатов: {len(profiles)}\n"
@@ -1321,6 +1333,11 @@ async def execute_paid_vk_search(message: Message, bot: Bot, image_bytes: bytes)
         return
 
     profiles = result.get("profiles", [])
+
+    # Debug: log first profile structure
+    if profiles:
+        logger.info(f"VK search result keys: {profiles[0].keys()}")
+        logger.info(f"First profile: {profiles[0]}")
 
     stats = (
         f"<b>✅ Поиск по VK завершён</b>\n\n"
