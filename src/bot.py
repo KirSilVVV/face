@@ -837,11 +837,10 @@ async def handle_successful_payment(message: Message, bot: Bot):
                 lines = ["🔓 <b>Все профили VK открыты!</b>\n"]
                 for i, p in enumerate(profiles, 1):
                     score = p.get("score", 0)
-                    first = p.get("first", "")
-                    last = p.get("last", "")
-                    vk_id = p.get("id", "")
+                    first = p.get("first_name", "")
+                    last = p.get("last_name", "")
                     name = f"{first} {last}".strip() or "Без имени"
-                    url = f"https://vk.com/id{vk_id}" if vk_id else "N/A"
+                    url = p.get("profile", "N/A")
                     lines.append(f"{i}. [{score}%] {name}\n   {url}")
             else:
                 # Интернет результаты
@@ -895,11 +894,10 @@ async def handle_successful_payment(message: Message, bot: Bot):
                 if result_index < len(profiles):
                     p = profiles[result_index]
                     score = p.get("score", 0)
-                    first = p.get("first", "")
-                    last = p.get("last", "")
-                    vk_id = p.get("id", "")
+                    first = p.get("first_name", "")
+                    last = p.get("last_name", "")
                     name = f"{first} {last}".strip() or "Без имени"
-                    url = f"https://vk.com/id{vk_id}" if vk_id else "N/A"
+                    url = p.get("profile", "N/A")
 
                     await message.answer(
                         f"🔓 <b>Профиль VK открыт!</b>\n\n"
@@ -1256,14 +1254,14 @@ async def execute_free_vk_search(message: Message, bot: Bot, image_bytes: bytes)
     # Показываем FREE_RESULTS_COUNT результатов
     for i, profile in enumerate(profiles[:FREE_RESULTS_COUNT], 1):
         score = profile.get("score", 0)
-        first_name = profile.get("first", "")
-        last_name = profile.get("last", "")
+        first_name = profile.get("first_name", "")
+        last_name = profile.get("last_name", "")
         name = f"{first_name} {last_name}".strip() or "Имя скрыто"
 
         caption = f"<b>#{i}</b> — Совпадение: {score}%\n👤 {mask_name(name)}\n🔒 <i>Ссылка скрыта</i>"
 
-        # Пробуем загрузить фото профиля
-        photo_url = profile.get("photo")
+        # Пробуем загрузить фото профиля (source = full photo, face = face thumbnail)
+        photo_url = profile.get("source") or profile.get("face")
         img_bytes = None
         if photo_url:
             img_bytes = await fetch_image_from_url(photo_url)
@@ -1363,15 +1361,15 @@ async def execute_paid_vk_search(message: Message, bot: Bot, image_bytes: bytes)
     # Показываем 10 результатов со ссылками
     for i, profile in enumerate(profiles[:10], 1):
         score = profile.get("score", 0)
-        first_name = profile.get("first", "")
-        last_name = profile.get("last", "")
-        vk_id = profile.get("id", "")
+        first_name = profile.get("first_name", "")
+        last_name = profile.get("last_name", "")
         name = f"{first_name} {last_name}".strip() or "Без имени"
-        vk_url = f"https://vk.com/id{vk_id}" if vk_id else "N/A"
+        vk_url = profile.get("profile", "N/A")  # Direct VK profile URL
 
         caption = f"<b>#{i}</b> — Совпадение: {score}%\n👤 {name}\n🔗 {vk_url}"
 
-        photo_url = profile.get("photo")
+        # Use 'source' for actual photo, 'face' as fallback
+        photo_url = profile.get("source") or profile.get("face")
         img_bytes = None
         if photo_url:
             img_bytes = await fetch_image_from_url(photo_url)
