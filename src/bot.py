@@ -35,7 +35,7 @@ facecheck = FaceCheckClient()
 search4faces = Search4FacesClient()
 
 # Version for debugging deployments
-BOT_VERSION = "v6.0-vk-search"
+BOT_VERSION = "v6.1-mode-selection"
 
 async def check_api_balance_and_alert(bot: Bot):
     """Check FaceCheck API balance and send notification after each search."""
@@ -75,6 +75,9 @@ last_search_by_user: dict[int, str] = {}
 
 # Store pending reminder tasks (search_id -> asyncio.Task)
 pending_reminders: dict[str, asyncio.Task] = {}
+
+# Store user's selected search mode (user_id -> "internet" | "vk")
+user_search_mode: dict[int, str] = {}
 
 # Results expiration time in seconds
 RESULTS_EXPIRATION_SECONDS = 30 * 60  # 30 минут
@@ -144,36 +147,57 @@ def is_result_expired(search_id: str) -> bool:
 
 WELCOME_MESSAGE = f"""<b>🔍 Бот Поиска по Лицу</b>
 
-Отправьте фото — найду профили в интернете или ВКонтакте.
+Выберите где искать и отправьте фото.
 
 <b>💰 Цены:</b>
 • Первый поиск: <b>БЕСПЛАТНО</b> ({FREE_RESULTS_COUNT} результата)
-• Разблокировать все: <b>{UNLOCK_ALL_STARS} ⭐</b>
 • Поиск по интернету: <b>{SEARCH_COST_STARS} ⭐</b>
 • Поиск по VK: <b>{VK_SEARCH_COST_STARS} ⭐</b>
 
-⏰ <i>Результаты действуют 30 минут</i>
-
 <b>📋 Команды:</b>
 /buy — Купить поиски
-/info — Ваши кредиты
 /stars — Купить звёзды дешевле
 
 <i>Данные из открытых источников. Фото не сохраняются.</i>"""
 
 
-def get_search_source_keyboard() -> InlineKeyboardMarkup:
-    """Create keyboard for selecting search source."""
+def get_mode_keyboard(current_mode: str = None) -> InlineKeyboardMarkup:
+    """Create keyboard for selecting search mode."""
+    internet_text = "🌐 Интернет" + (" ✓" if current_mode == "internet" else "")
+    vk_text = "📱 ВКонтакте" + (" ✓" if current_mode == "vk" else "")
+
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text="🌐 Интернет (все сайты)",
-            callback_data="source_internet"
-        )],
-        [InlineKeyboardButton(
-            text="📱 ВКонтакте",
-            callback_data="source_vk"
-        )],
+        [
+            InlineKeyboardButton(text=internet_text, callback_data="mode_internet"),
+            InlineKeyboardButton(text=vk_text, callback_data="mode_vk")
+        ],
     ])
+
+
+def get_search_confirm_keyboard(mode: str) -> InlineKeyboardMarkup:
+    """Create keyboard to confirm search or change mode."""
+    if mode == "vk":
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text=f"🔍 Искать в VK",
+                callback_data="confirm_search"
+            )],
+            [InlineKeyboardButton(
+                text="🔄 Изменить на Интернет",
+                callback_data="switch_to_internet"
+            )],
+        ])
+    else:
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text=f"🔍 Искать в Интернете",
+                callback_data="confirm_search"
+            )],
+            [InlineKeyboardButton(
+                text="🔄 Изменить на VK",
+                callback_data="switch_to_vk"
+            )],
+        ])
 
 
 def blur_image(img_bytes: bytes, blur_radius: int = 30) -> bytes:
@@ -282,15 +306,24 @@ async def cmd_start(message: Message):
     # Отслеживание события
     await db.track_event(message.from_user.id, "bot_start")
 
+    # Устанавливаем режим по умолчанию - Интернет
+    user_id = message.from_user.id
+    if user_id not in user_search_mode:
+        user_search_mode[user_id] = "internet"
+
+    current_mode = user_search_mode[user_id]
+    mode_text = "🌐 Интернет" if current_mode == "internet" else "📱 ВКонтакте"
+
     # Проверка ежедневного бонуса
-    granted = await db.check_and_grant_daily_free_search(message.from_user.id)
+    granted = await db.check_and_grant_daily_free_search(user_id)
+    bonus_text = ""
     if granted:
-        await message.answer(
-            "🎁 <b>Ежедневный бонус!</b>\n"
-            "Вы получили 1 бесплатный поиск сегодня!\n\n" + WELCOME_MESSAGE
-        )
-    else:
-        await message.answer(WELCOME_MESSAGE)
+        bonus_text = "🎁 <b>Ежедневный бонус!</b> +1 бесплатный поиск!\n\n"
+
+    await message.answer(
+        bonus_text + WELCOME_MESSAGE + f"\n\n<b>Текущий режим:</b> {mode_text}",
+        reply_markup=get_mode_keyboard(current_mode)
+    )
 
 
 @router.message(Command("info"))
@@ -497,6 +530,122 @@ async def handle_buy_5_searches(callback: CallbackQuery, bot: Bot):
         prices=[LabeledPrice(label="5 Поисков", amount=SEARCH_PACK_5_STARS)],
     )
     await callback.answer()
+
+
+@router.callback_query(F.data == "mode_internet")
+async def handle_mode_internet(callback: CallbackQuery):
+    """Пользователь выбрал режим Интернет."""
+    user_id = callback.from_user.id
+    user_search_mode[user_id] = "internet"
+
+    await callback.message.edit_reply_markup(
+        reply_markup=get_mode_keyboard("internet")
+    )
+    await callback.answer("Режим: Интернет (все сайты)")
+
+
+@router.callback_query(F.data == "mode_vk")
+async def handle_mode_vk(callback: CallbackQuery):
+    """Пользователь выбрал режим VK."""
+    user_id = callback.from_user.id
+    user_search_mode[user_id] = "vk"
+
+    await callback.message.edit_reply_markup(
+        reply_markup=get_mode_keyboard("vk")
+    )
+    await callback.answer("Режим: ВКонтакте")
+
+
+@router.callback_query(F.data == "switch_to_internet")
+async def handle_switch_to_internet(callback: CallbackQuery):
+    """Переключить на Интернет перед поиском."""
+    user_id = callback.from_user.id
+    user_search_mode[user_id] = "internet"
+
+    credits = await db.get_user_credits(user_id)
+    free_searches = credits.get("free_searches", 0)
+
+    if free_searches > 0:
+        price_text = "БЕСПЛАТНО"
+    else:
+        price_text = f"{SEARCH_COST_STARS} ⭐"
+
+    await callback.message.edit_text(
+        f"📸 <b>Фото готово к поиску</b>\n\n"
+        f"<b>Режим:</b> 🌐 Интернет (все сайты)\n"
+        f"<b>Цена:</b> {price_text}",
+        reply_markup=get_search_confirm_keyboard("internet")
+    )
+    await callback.answer("Режим изменён на Интернет")
+
+
+@router.callback_query(F.data == "switch_to_vk")
+async def handle_switch_to_vk(callback: CallbackQuery):
+    """Переключить на VK перед поиском."""
+    user_id = callback.from_user.id
+    user_search_mode[user_id] = "vk"
+
+    credits = await db.get_user_credits(user_id)
+    free_searches = credits.get("free_searches", 0)
+
+    if free_searches > 0:
+        price_text = "БЕСПЛАТНО"
+    else:
+        price_text = f"{VK_SEARCH_COST_STARS} ⭐"
+
+    await callback.message.edit_text(
+        f"📸 <b>Фото готово к поиску</b>\n\n"
+        f"<b>Режим:</b> 📱 ВКонтакте\n"
+        f"<b>Цена:</b> {price_text}",
+        reply_markup=get_search_confirm_keyboard("vk")
+    )
+    await callback.answer("Режим изменён на VK")
+
+
+@router.callback_query(F.data == "confirm_search")
+async def handle_confirm_search(callback: CallbackQuery, bot: Bot):
+    """Подтверждение поиска - запускаем поиск в выбранном режиме."""
+    user_id = callback.from_user.id
+
+    if user_id not in pending_photos:
+        await callback.answer("Фото не найдено. Отправьте новое фото.", show_alert=True)
+        return
+
+    image_bytes = pending_photos.pop(user_id)
+    mode = user_search_mode.get(user_id, "internet")
+    credits = await db.get_user_credits(user_id)
+    free_searches = credits.get("free_searches", 0)
+
+    await callback.answer()
+
+    if mode == "vk":
+        if free_searches > 0:
+            await execute_free_vk_search(callback.message, bot, image_bytes)
+        else:
+            pending_photos[user_id] = image_bytes  # Возвращаем фото для платного поиска
+            await db.track_event(user_id, "payment_clicked", {"type": "vk_search"})
+            await bot.send_invoice(
+                chat_id=user_id,
+                title="Поиск по ВКонтакте",
+                description="10 результатов профилей VK",
+                payload="paid_search_vk",
+                currency="XTR",
+                prices=[LabeledPrice(label="Поиск по VK", amount=VK_SEARCH_COST_STARS)],
+            )
+    else:
+        if free_searches > 0:
+            await execute_free_search(callback.message, bot, image_bytes)
+        else:
+            pending_photos[user_id] = image_bytes  # Возвращаем фото для платного поиска
+            await db.track_event(user_id, "payment_clicked", {"type": "internet_search"})
+            await bot.send_invoice(
+                chat_id=user_id,
+                title="Поиск по интернету",
+                description="10 результатов со ссылками со всего интернета",
+                payload="paid_search_internet",
+                currency="XTR",
+                prices=[LabeledPrice(label="Поиск по интернету", amount=SEARCH_COST_STARS)],
+            )
 
 
 @router.callback_query(F.data == "source_internet")
@@ -863,16 +1012,15 @@ async def execute_paid_search(message: Message, bot: Bot, image_bytes: bytes):
 
 @router.message(F.photo)
 async def handle_photo(message: Message, bot: Bot):
-    user = await db.get_or_create_user(
-        message.from_user.id,
-        message.from_user.username
-    )
+    user_id = message.from_user.id
+
+    user = await db.get_or_create_user(user_id, message.from_user.username)
 
     # Отслеживаем событие
-    await db.track_event(message.from_user.id, "photo_sent")
+    await db.track_event(user_id, "photo_sent")
 
     # Проверяем ежедневный бесплатный поиск
-    await db.check_and_grant_daily_free_search(message.from_user.id)
+    await db.check_and_grant_daily_free_search(user_id)
 
     # Скачиваем фото
     photo = message.photo[-1]
@@ -881,27 +1029,33 @@ async def handle_photo(message: Message, bot: Bot):
     image_bytes = image_data.read()
 
     # Сохраняем фото для последующего поиска
-    pending_photos[message.from_user.id] = image_bytes
+    pending_photos[user_id] = image_bytes
 
-    # Показываем выбор источника поиска
-    credits = await db.get_user_credits(message.from_user.id)
+    # Получаем текущий режим пользователя
+    mode = user_search_mode.get(user_id, "internet")
+    credits = await db.get_user_credits(user_id)
     free_searches = credits.get("free_searches", 0)
 
-    if free_searches > 0:
-        text = (
-            "📸 <b>Фото получено!</b>\n\n"
-            f"У вас <b>{free_searches}</b> бесплатный поиск.\n"
-            "Выберите где искать:"
-        )
+    # Формируем текст подтверждения
+    if mode == "vk":
+        mode_text = "📱 ВКонтакте"
+        price = VK_SEARCH_COST_STARS
     else:
-        text = (
-            "📸 <b>Фото получено!</b>\n\n"
-            "Выберите где искать:\n"
-            f"• Интернет — <b>{SEARCH_COST_STARS} ⭐</b>\n"
-            f"• ВКонтакте — <b>{VK_SEARCH_COST_STARS} ⭐</b>"
-        )
+        mode_text = "🌐 Интернет (все сайты)"
+        price = SEARCH_COST_STARS
 
-    await message.answer(text, reply_markup=get_search_source_keyboard())
+    if free_searches > 0:
+        price_text = "БЕСПЛАТНО"
+    else:
+        price_text = f"{price} ⭐"
+
+    text = (
+        f"📸 <b>Фото готово к поиску</b>\n\n"
+        f"<b>Режим:</b> {mode_text}\n"
+        f"<b>Цена:</b> {price_text}"
+    )
+
+    await message.answer(text, reply_markup=get_search_confirm_keyboard(mode))
 
 
 async def execute_free_search(message: Message, bot: Bot, image_bytes: bytes):
