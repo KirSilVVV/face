@@ -225,3 +225,129 @@ async def record_payment(
         logger.info(f"Payment recorded: {telegram_id} paid {stars_amount} stars for {searches_amount} searches")
         return True
     return False
+
+
+# ============ АНАЛИТИКА ============
+
+async def track_event(
+    telegram_id: int,
+    event_type: str,
+    metadata: dict = None
+) -> bool:
+    """
+    Отслеживание событий для аналитики.
+    Типы: bot_start, photo_sent, payment_clicked, payment_completed, unlock_clicked, search_completed
+    """
+    client = get_client()
+
+    record = {
+        "telegram_id": telegram_id,
+        "event_type": event_type,
+        "metadata": metadata or {}
+    }
+
+    result = await client.insert("events", record)
+    if result:
+        logger.debug(f"Event tracked: {telegram_id} - {event_type}")
+        return True
+    return False
+
+
+async def get_stats() -> dict:
+    """Статистика бота для админа."""
+    client = get_client()
+
+    # Всего пользователей
+    users = await client.select("users", columns="telegram_id")
+    total_users = len(users)
+
+    # Платящие пользователи
+    payments = await client.select("payments", columns="telegram_id")
+    paying_users = len(set(p["telegram_id"] for p in payments))
+
+    # Общая выручка
+    all_payments = await client.select("payments", columns="stars_amount")
+    total_stars = sum(p["stars_amount"] for p in all_payments)
+
+    # Статистика событий
+    events = await client.select("events", columns="event_type")
+    event_counts = {}
+    for e in events:
+        et = e["event_type"]
+        event_counts[et] = event_counts.get(et, 0) + 1
+
+    return {
+        "total_users": total_users,
+        "paying_users": paying_users,
+        "conversion_rate": round(paying_users / total_users * 100, 1) if total_users > 0 else 0,
+        "total_stars": total_stars,
+        "events": event_counts
+    }
+
+
+# ============ ЕЖЕДНЕВНЫЙ БЕСПЛАТНЫЙ ПОИСК ============
+
+async def check_and_grant_daily_free_search(telegram_id: int) -> bool:
+    """
+    Проверка права на ежедневный бесплатный поиск.
+    Если last_free_grant > 24ч назад, даём 1 бесплатный поиск.
+    Возвращает True если поиск был выдан.
+    """
+    client = get_client()
+
+    result = await client.select("users", {"telegram_id": telegram_id}, "free_searches,last_free_grant")
+    if not result:
+        return False
+
+    user = result[0]
+    last_grant = user.get("last_free_grant")
+
+    # Проверяем прошло ли 24 часа
+    should_grant = False
+
+    if last_grant is None:
+        # Никогда не выдавали (старый пользователь) - не выдаём автоматически
+        should_grant = False
+    else:
+        # Парсим timestamp и проверяем прошло ли 24ч
+        try:
+            from datetime import datetime, timedelta, timezone
+            if isinstance(last_grant, str):
+                last_grant_dt = datetime.fromisoformat(last_grant.replace('Z', '+00:00'))
+            else:
+                last_grant_dt = last_grant
+
+            now = datetime.now(timezone.utc)
+            if now - last_grant_dt > timedelta(hours=24):
+                should_grant = True
+        except Exception as e:
+            logger.error(f"Error parsing last_free_grant: {e}")
+            should_grant = False
+
+    if should_grant and user["free_searches"] == 0:
+        from datetime import datetime, timezone
+        # Выдаём ежедневный бесплатный поиск
+        await client.update(
+            "users",
+            {"telegram_id": telegram_id},
+            {
+                "free_searches": 1,
+                "last_free_grant": datetime.now(timezone.utc).isoformat()
+            }
+        )
+        logger.info(f"Daily free search granted to {telegram_id}")
+        return True
+
+    return False
+
+
+async def mark_free_search_granted(telegram_id: int) -> bool:
+    """Отметить когда пользователь получил бесплатный поиск (для новых юзеров)."""
+    client = get_client()
+    from datetime import datetime, timezone
+
+    return await client.update(
+        "users",
+        {"telegram_id": telegram_id},
+        {"last_free_grant": datetime.now(timezone.utc).isoformat()}
+    )

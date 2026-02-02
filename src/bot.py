@@ -1,5 +1,7 @@
+import asyncio
 import base64
 import logging
+import time
 from io import BytesIO
 
 import httpx
@@ -31,7 +33,7 @@ router = Router()
 facecheck = FaceCheckClient()
 
 # Version for debugging deployments
-BOT_VERSION = "v4.0-new-pricing"
+BOT_VERSION = "v5.0-conversion-boost"
 
 async def check_api_balance_and_alert(bot: Bot):
     """Check FaceCheck API balance and send notification after each search."""
@@ -60,7 +62,7 @@ async def check_api_balance_and_alert(bot: Bot):
     except Exception as e:
         logger.error(f"Balance check error: {e}")
 
-# Store pending search results temporarily (search_id -> results)
+# Store pending search results temporarily (search_id -> {result, created_at, user_id, unlocked})
 pending_results: dict[str, dict] = {}
 
 # Store pending photos for paid search (user_id -> image_bytes)
@@ -69,27 +71,93 @@ pending_photos: dict[int, bytes] = {}
 # Store last search_id for each user (for /debug command)
 last_search_by_user: dict[int, str] = {}
 
+# Store pending reminder tasks (search_id -> asyncio.Task)
+pending_reminders: dict[str, asyncio.Task] = {}
+
+# Results expiration time in seconds
+RESULTS_EXPIRATION_SECONDS = 30 * 60  # 30 минут
+
+# Reminder time (5 minutes before expiration)
+REMINDER_DELAY_SECONDS = 25 * 60  # 25 минут
+
+# Free search shows only 3 results (paid shows 10)
+FREE_RESULTS_COUNT = 3
+
+
+async def schedule_expiry_reminder(bot: Bot, user_id: int, search_id: str):
+    """Напоминание за 5 минут до истечения результатов."""
+    try:
+        await asyncio.sleep(REMINDER_DELAY_SECONDS)
+
+        # Проверяем существуют ли результаты и не разблокированы ли они
+        if search_id in pending_results:
+            result = pending_results[search_id]
+            if not result.get("_unlocked", False):
+                try:
+                    await bot.send_message(
+                        chat_id=user_id,
+                        text="⏰ <b>Осталось 5 минут!</b>\n\n"
+                             "Ваши результаты поиска скоро исчезнут.\n"
+                             f"🔥 Разблокируйте все за <b>{UNLOCK_ALL_STARS} ⭐</b>",
+                        reply_markup=get_unlock_all_keyboard(search_id)
+                    )
+                    logger.info(f"Reminder sent to {user_id} for search {search_id}")
+                except Exception as e:
+                    logger.error(f"Failed to send reminder: {e}")
+
+    except asyncio.CancelledError:
+        pass
+    finally:
+        if search_id in pending_reminders:
+            del pending_reminders[search_id]
+
+
+def mask_name(name: str) -> str:
+    """Маскирует имя: 'Анна Козлова' -> 'Ан***а Ко***ва'"""
+    if not name:
+        return "***"
+
+    parts = name.split()
+    masked_parts = []
+
+    for part in parts:
+        if len(part) <= 2:
+            masked_parts.append(part[0] + "***")
+        elif len(part) <= 4:
+            masked_parts.append(part[0] + "***" + part[-1])
+        else:
+            masked_parts.append(part[:2] + "***" + part[-2:])
+
+    return " ".join(masked_parts)
+
+
+def is_result_expired(search_id: str) -> bool:
+    """Проверка истёк ли результат поиска."""
+    if search_id not in pending_results:
+        return True
+
+    result = pending_results[search_id]
+    created_at = result.get("_created_at", 0)
+    return (time.time() - created_at) > RESULTS_EXPIRATION_SECONDS
+
 WELCOME_MESSAGE = f"""<b>🔍 Бот Поиска по Лицу</b>
 
 Отправьте фото — найду профили в интернете.
 
-<b>💎 Цены:</b>
-• Первый поиск: <b>БЕСПЛАТНО</b> (10 результатов, ссылки скрыты)
-• Открыть 1 ссылку: {UNLOCK_SINGLE_STARS} ⭐
-• Открыть ВСЕ 10 ссылок: {UNLOCK_ALL_STARS} ⭐
-• Новый поиск: {SEARCH_COST_STARS} ⭐ (10 результатов со ссылками)
-• Пакет 5 поисков: {SEARCH_PACK_5_STARS} ⭐ (экономия {SEARCH_COST_STARS * 5 - SEARCH_PACK_5_STARS} ⭐)
+<b>💰 Цены:</b>
+• Первый поиск: <b>БЕСПЛАТНО</b> ({FREE_RESULTS_COUNT} результата)
+• Разблокировать все: <b>{UNLOCK_ALL_STARS} ⭐</b>
+• Полный поиск: <b>{SEARCH_COST_STARS} ⭐</b> (10 результатов + ссылки)
+• 5 поисков: <b>{SEARCH_PACK_5_STARS} ⭐</b> (экономия {SEARCH_COST_STARS * 5 - SEARCH_PACK_5_STARS} ⭐)
 
-<b>Команды:</b>
-/start - Это сообщение
-/buy - Купить поиски
-/info - Ваши кредиты
+⏰ <i>Результаты действуют 30 минут</i>
 
-<b>⚠️ Важно:</b>
-• Бот работает только с публичными источниками
-• Результаты — предположительные совпадения, не подтверждение личности
-• Используйте только с согласия человека на фото
-• Изображения не сохраняются после обработки"""
+<b>📋 Команды:</b>
+/buy — Купить поиски
+/info — Ваши кредиты
+/stars — Купить звёзды дешевле
+
+<i>Данные из открытых источников. Фото не сохраняются.</i>"""
 
 
 def blur_image(img_bytes: bytes, blur_radius: int = 30) -> bytes:
@@ -194,7 +262,19 @@ async def cmd_start(message: Message):
         message.from_user.id,
         message.from_user.username
     )
-    await message.answer(WELCOME_MESSAGE)
+
+    # Отслеживание события
+    await db.track_event(message.from_user.id, "bot_start")
+
+    # Проверка ежедневного бонуса
+    granted = await db.check_and_grant_daily_free_search(message.from_user.id)
+    if granted:
+        await message.answer(
+            "🎁 <b>Ежедневный бонус!</b>\n"
+            "Вы получили 1 бесплатный поиск сегодня!\n\n" + WELCOME_MESSAGE
+        )
+    else:
+        await message.answer(WELCOME_MESSAGE)
 
 
 @router.message(Command("info"))
@@ -227,26 +307,49 @@ async def cmd_buy(message: Message):
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
-            text=f"🔍 1 поиск - {SEARCH_COST_STARS} ⭐",
+            text=f"🔍 1 поиск — {SEARCH_COST_STARS} ⭐",
             callback_data="buy_1_search"
         )],
         [InlineKeyboardButton(
-            text=f"🎁 5 поисков - {SEARCH_PACK_5_STARS} ⭐ (экономия {SEARCH_COST_STARS * 5 - SEARCH_PACK_5_STARS} ⭐)",
+            text=f"🔥 5 поисков — {SEARCH_PACK_5_STARS} ⭐ (экономия {SEARCH_COST_STARS * 5 - SEARCH_PACK_5_STARS} ⭐)",
             callback_data="buy_5_searches"
         )],
     ])
 
     await message.answer(
-        f"<b>💎 Купить поиски</b>\n\n"
-        f"Ваши кредиты: {free + paid} ({free} бесп. + {paid} платн.)\n\n"
-        f"Каждый поиск даёт 10 результатов со ссылками.",
+        f"<b>💰 Купить поиски</b>\n\n"
+        f"Ваши кредиты: <b>{free + paid}</b>\n\n"
+        f"Каждый поиск = 10 результатов с прямыми ссылками.\n\n"
+        f"<i>💡 Нет звёзд? Команда /stars — где купить дешевле</i>",
         reply_markup=keyboard
+    )
+
+
+@router.message(Command("stars"))
+async def cmd_stars(message: Message):
+    """Информация о покупке Telegram Stars."""
+    await message.answer(
+        "<b>⭐ Как получить Telegram Stars</b>\n\n"
+        "1️⃣ <b>В Telegram</b> — нажмите любую кнопку оплаты\n"
+        "2️⃣ <b>fragment.com</b> — купите дешевле (до 30% экономии)\n"
+        "3️⃣ <b>За рубли</b> — на бирже gaming-goods.ru\n\n"
+        "<i>Fragment — официальная площадка Telegram</i>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="🇷🇺 Купить за рубли",
+                url="https://gaming-goods.ru/t/telegram-stars?product=966299&ref=20"
+            )]
+        ])
     )
 
 
 @router.message(Command("reset"))
 async def cmd_reset(message: Message):
-    """Reset user credits for testing."""
+    """Сброс кредитов — только для АДМИНА."""
+    if str(message.from_user.id) != ADMIN_CHAT_ID:
+        await message.answer("Эта команда недоступна.")
+        return
+
     success = await db.reset_user_credits(message.from_user.id)
     if success:
         await message.answer(
@@ -254,6 +357,29 @@ async def cmd_reset(message: Message):
         )
     else:
         await message.answer("Не удалось сбросить кредиты.")
+
+
+@router.message(Command("stats"))
+async def cmd_stats(message: Message):
+    """Статистика бота — только для АДМИНА."""
+    if str(message.from_user.id) != ADMIN_CHAT_ID:
+        await message.answer("Эта команда недоступна.")
+        return
+
+    stats = await db.get_stats()
+
+    events_text = "\n".join([
+        f"  • {k}: {v}" for k, v in stats.get("events", {}).items()
+    ]) or "  Событий пока нет"
+
+    await message.answer(
+        f"<b>📊 Статистика бота</b>\n\n"
+        f"👥 Всего пользователей: <b>{stats['total_users']}</b>\n"
+        f"💰 Платящих: <b>{stats['paying_users']}</b>\n"
+        f"📈 Конверсия: <b>{stats['conversion_rate']}%</b>\n"
+        f"⭐ Выручка: <b>{stats['total_stars']} звёзд</b>\n\n"
+        f"<b>События:</b>\n{events_text}"
+    )
 
 
 @router.message(Command("debug"))
@@ -314,7 +440,8 @@ async def cmd_debug(message: Message):
 
 @router.callback_query(F.data == "paid_search")
 async def handle_paid_search_request(callback: CallbackQuery, bot: Bot):
-    """User wants to do a paid search - send invoice."""
+    """Пользователь хочет платный поиск — отправляем инвойс."""
+    await db.track_event(callback.from_user.id, "payment_clicked", {"type": "paid_search"})
     await bot.send_invoice(
         chat_id=callback.from_user.id,
         title="Поиск по лицу",
@@ -328,7 +455,8 @@ async def handle_paid_search_request(callback: CallbackQuery, bot: Bot):
 
 @router.callback_query(F.data == "buy_1_search")
 async def handle_buy_1_search(callback: CallbackQuery, bot: Bot):
-    """Buy 1 search credit."""
+    """Покупка 1 поиска."""
+    await db.track_event(callback.from_user.id, "payment_clicked", {"type": "buy_1_search"})
     await bot.send_invoice(
         chat_id=callback.from_user.id,
         title="1 Поиск",
@@ -342,7 +470,8 @@ async def handle_buy_1_search(callback: CallbackQuery, bot: Bot):
 
 @router.callback_query(F.data == "buy_5_searches")
 async def handle_buy_5_searches(callback: CallbackQuery, bot: Bot):
-    """Buy 5 searches pack."""
+    """Покупка пакета 5 поисков."""
+    await db.track_event(callback.from_user.id, "payment_clicked", {"type": "buy_5_searches"})
     await bot.send_invoice(
         chat_id=callback.from_user.id,
         title="Пакет 5 поисков",
@@ -356,8 +485,9 @@ async def handle_buy_5_searches(callback: CallbackQuery, bot: Bot):
 
 @router.callback_query(F.data.startswith("unlock_all_"))
 async def handle_unlock_all(callback: CallbackQuery, bot: Bot):
-    """Unlock all 10 results at once."""
+    """Разблокировать все 10 результатов сразу."""
     search_id = callback.data.replace("unlock_all_", "")
+    await db.track_event(callback.from_user.id, "unlock_clicked", {"type": "unlock_all", "search_id": search_id})
     await bot.send_invoice(
         chat_id=callback.from_user.id,
         title="Открыть все 10",
@@ -371,7 +501,7 @@ async def handle_unlock_all(callback: CallbackQuery, bot: Bot):
 
 @router.callback_query(F.data.startswith("unlock_"))
 async def handle_unlock(callback: CallbackQuery, bot: Bot):
-    # Skip if it's unlock_all (handled separately)
+    # Пропускаем если это unlock_all (обрабатывается отдельно)
     if callback.data.startswith("unlock_all_"):
         return
 
@@ -379,7 +509,9 @@ async def handle_unlock(callback: CallbackQuery, bot: Bot):
     search_id = parts[1]
     result_index = int(parts[2])
 
-    # Send invoice for unlocking the link
+    await db.track_event(callback.from_user.id, "unlock_clicked", {"type": "unlock_single", "search_id": search_id})
+
+    # Отправляем инвойс для разблокировки ссылки
     await bot.send_invoice(
         chat_id=callback.from_user.id,
         title="Открыть ссылку",
@@ -403,8 +535,11 @@ async def handle_successful_payment(message: Message, bot: Bot):
     stars = message.successful_payment.total_amount
     user_id = message.from_user.id
 
+    # Отслеживаем событие оплаты
+    await db.track_event(user_id, "payment_completed", {"type": payload, "stars": stars})
+
     if payload == "paid_search":
-        # User paid for a search - now execute it
+        # Пользователь оплатил поиск — выполняем его
         await db.record_payment(user_id, stars, 1, payment_id)
 
         if user_id not in pending_photos:
@@ -417,31 +552,37 @@ async def handle_successful_payment(message: Message, bot: Bot):
         await execute_paid_search(message, bot, image_bytes)
 
     elif payload == "buy_1_search":
-        # Add 1 search credit
+        # Добавляем 1 поиск
         await db.add_paid_searches(user_id, 1)
         await db.record_payment(user_id, stars, 1, payment_id)
         await message.answer(
-            "✅ <b>1 поиск добавлен!</b>\n"
-            "Отправьте фото для начала."
+            "✅ <b>1 поиск добавлен!</b>\n\n"
+            "📸 Отправьте фото для начала поиска."
         )
 
     elif payload == "buy_5_searches":
-        # Add 5 search credits
+        # Добавляем 5 поисков
         await db.add_paid_searches(user_id, 5)
         await db.record_payment(user_id, stars, 5, payment_id)
         await message.answer(
-            "✅ <b>5 поисков добавлено!</b>\n"
-            "Отправьте фото для начала."
+            "✅ <b>5 поисков добавлено!</b>\n\n"
+            "📸 Отправьте фото для начала поиска."
         )
 
     elif payload.startswith("unlock_all_"):
         search_id = payload.replace("unlock_all_", "")
 
-        if search_id in pending_results:
+        # Отменяем напоминание для этого поиска
+        if search_id in pending_reminders:
+            pending_reminders[search_id].cancel()
+            del pending_reminders[search_id]
+
+        if search_id in pending_results and not is_result_expired(search_id):
             results = pending_results[search_id]
+            results["_unlocked"] = True  # Помечаем как разблокированные
             faces = results.get("output", {}).get("items", [])[:10]
 
-            lines = ["🔓 <b>Все ссылки открыты</b>\n"]
+            lines = ["🔓 <b>Все ссылки открыты!</b>\n"]
             for i, face in enumerate(faces, 1):
                 score = face.get("score", 0)
                 url = face.get("url", "N/A")
@@ -451,9 +592,22 @@ async def handle_successful_payment(message: Message, bot: Bot):
                 "\n".join(lines),
                 link_preview_options=LinkPreviewOptions(is_disabled=True)
             )
+
+            # Upsell после разблокировки
+            await message.answer(
+                "🔍 <b>Хотите искать ещё?</b>\n"
+                f"Купите больше поисков по <b>{SEARCH_COST_STARS} ⭐</b>!",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(
+                        text=f"🔥 5 поисков — {SEARCH_PACK_5_STARS} ⭐",
+                        callback_data="buy_5_searches"
+                    )]
+                ])
+            )
         else:
             await message.answer(
-                "Результаты устарели. Сделайте новый поиск."
+                "⏰ <b>Результаты истекли!</b>\n\n"
+                "Отправьте новое фото для поиска."
             )
 
         await db.record_payment(user_id, stars, 0, payment_id)
@@ -463,7 +617,7 @@ async def handle_successful_payment(message: Message, bot: Bot):
         search_id = parts[1]
         result_index = int(parts[2])
 
-        if search_id in pending_results:
+        if search_id in pending_results and not is_result_expired(search_id):
             results = pending_results[search_id]
             faces = results.get("output", {}).get("items", [])
 
@@ -472,21 +626,22 @@ async def handle_successful_payment(message: Message, bot: Bot):
                 url = face.get("url", "N/A")
 
                 await message.answer(
-                    f"🔓 <b>Ссылка открыта</b>\n\n"
+                    f"🔓 <b>Ссылка открыта!</b>\n\n"
                     f"Совпадение: {face.get('score', 0)}%\n"
                     f"🔗 {url}",
                     link_preview_options=LinkPreviewOptions(is_disabled=True)
                 )
         else:
             await message.answer(
-                "Результаты устарели. Сделайте новый поиск."
+                "⏰ <b>Результаты истекли!</b>\n\n"
+                "Отправьте новое фото для поиска."
             )
 
         await db.record_payment(user_id, stars, 0, payment_id)
 
 
 async def execute_paid_search(message: Message, bot: Bot, image_bytes: bytes):
-    """Execute a paid search and show 5 results with links."""
+    """Платный поиск: показываем 10 результатов со ссылками."""
     status_msg = await message.answer("🔍 Поиск...")
 
     last_progress_text = ""
@@ -519,7 +674,7 @@ async def execute_paid_search(message: Message, bot: Bot, image_bytes: bytes):
     took_sec = output.get('tookSeconds') or 0
 
     stats = (
-        f"<b>✅ Поиск завершен</b>\n\n"
+        f"<b>✅ Поиск завершён</b>\n\n"
         f"Просканировано лиц: {searched_str}\n"
         f"Время: {took_sec:.1f}с\n"
         f"Результатов: {min(len(faces), 10)}\n"
@@ -529,19 +684,20 @@ async def execute_paid_search(message: Message, bot: Bot, image_bytes: bytes):
         await status_msg.edit_text(stats + "\n<i>Совпадений не найдено.</i>")
         return
 
-    # Store search results for /debug command
+    # Сохраняем результаты с timestamp
     search_id = result.get("id_search") or str(message.message_id)
+    result["_created_at"] = time.time()
     pending_results[search_id] = result
     last_search_by_user[message.from_user.id] = search_id
 
     await status_msg.edit_text(stats + "\nОтправка результатов...")
 
-    # Paid search: show 10 results with links
+    # Платный поиск: показываем 10 результатов со ссылками
     for i, face in enumerate(faces[:10], 1):
         score = face.get("score", 0)
         url = face.get("url", "N/A")
 
-        caption = f"<b>#{i}</b> - Совпадение: {score}%\n🔗 {url}"
+        caption = f"<b>#{i}</b> — Совпадение: {score}%\n🔗 {url}"
 
         img_bytes = await get_image_bytes(face)
         if img_bytes:
@@ -560,11 +716,14 @@ async def execute_paid_search(message: Message, bot: Bot, image_bytes: bytes):
 
     await status_msg.delete()
 
-    # Extract and show names from VK profiles
+    # Извлекаем и показываем имена из VK профилей
     names = await extract_names_from_results(faces[:10])
     await send_name_summary(message, names)
 
-    # Check API balance and alert if low
+    # Отслеживаем событие завершения поиска
+    await db.track_event(message.from_user.id, "search_completed", {"type": "paid", "results": min(len(faces), 10)})
+
+    # Проверяем баланс API и оповещаем если низкий
     await check_api_balance_and_alert(bot)
 
 
@@ -575,20 +734,26 @@ async def handle_photo(message: Message, bot: Bot):
         message.from_user.username
     )
 
+    # Отслеживаем событие
+    await db.track_event(message.from_user.id, "photo_sent")
+
+    # Проверяем ежедневный бесплатный поиск
+    await db.check_and_grant_daily_free_search(message.from_user.id)
+
     credits = await db.get_user_credits(message.from_user.id)
     free_searches = credits.get("free_searches", 0)
 
-    # Download the photo
+    # Скачиваем фото
     photo = message.photo[-1]
     file = await bot.get_file(photo.file_id)
     image_data = await bot.download_file(file.file_path)
     image_bytes = image_data.read()
 
     if free_searches > 0:
-        # FREE SEARCH: 10 results with hidden links
+        # БЕСПЛАТНЫЙ ПОИСК: 3 результата со скрытыми ссылками
         await execute_free_search(message, bot, image_bytes)
     else:
-        # PAID SEARCH: Store photo and request payment
+        # ПЛАТНЫЙ ПОИСК: Сохраняем фото и запрашиваем оплату
         pending_photos[message.from_user.id] = image_bytes
         await bot.send_invoice(
             chat_id=message.from_user.id,
@@ -601,7 +766,7 @@ async def handle_photo(message: Message, bot: Bot):
 
 
 async def execute_free_search(message: Message, bot: Bot, image_bytes: bytes):
-    """Execute a free search and show 10 results with hidden links."""
+    """Бесплатный поиск: показываем только 3 результата со скрытыми ссылками."""
     status_msg = await message.answer("🔍 Поиск...")
 
     last_progress_text = ""
@@ -626,7 +791,7 @@ async def execute_free_search(message: Message, bot: Bot, image_bytes: bytes):
         await status_msg.edit_text(f"Ошибка: {result['error']}")
         return
 
-    # Use free search credit
+    # Используем бесплатный поиск
     await db.use_search(message.from_user.id)
 
     output = result.get("output", {})
@@ -637,7 +802,7 @@ async def execute_free_search(message: Message, bot: Bot, image_bytes: bytes):
     took_sec = output.get('tookSeconds') or 0
 
     stats = (
-        f"<b>✅ Бесплатный поиск завершен</b>\n\n"
+        f"<b>✅ Бесплатный поиск завершён</b>\n\n"
         f"Просканировано лиц: {searched_str}\n"
         f"Время: {took_sec:.1f}с\n"
         f"Результатов: {min(len(faces), 10)}\n"
@@ -647,19 +812,28 @@ async def execute_free_search(message: Message, bot: Bot, image_bytes: bytes):
         await status_msg.edit_text(stats + "\n<i>Совпадений не найдено.</i>")
         return
 
+    # Сохраняем результаты с timestamp
     search_id = result.get("id_search") or str(message.message_id)
+    result["_created_at"] = time.time()
     pending_results[search_id] = result
     last_search_by_user[message.from_user.id] = search_id
 
+    # Вычисляем сколько ещё результатов скрыто
+    total_results = min(len(faces), 10)
+    hidden_count = total_results - FREE_RESULTS_COUNT
+
     await status_msg.edit_text(
-        stats + f"\n<i>🔒 Ссылки скрыты. Открыть 1 за {UNLOCK_SINGLE_STARS} ⭐ или ВСЕ за {UNLOCK_ALL_STARS} ⭐</i>"
+        stats +
+        f"\n⏰ <b>Результаты действуют 30 минут!</b>\n"
+        f"<i>🔒 Показано {FREE_RESULTS_COUNT} из {total_results} результатов. "
+        f"Разблокируйте все {total_results} за {UNLOCK_ALL_STARS} ⭐</i>"
     )
 
-    # Free search: show 10 results with hidden links
-    for i, face in enumerate(faces[:10], 1):
+    # Бесплатный поиск: показываем только FREE_RESULTS_COUNT результатов
+    for i, face in enumerate(faces[:FREE_RESULTS_COUNT], 1):
         score = face.get("score", 0)
 
-        caption = f"<b>#{i}</b> - Совпадение: {score}%\n🔒 <i>Ссылка скрыта</i>"
+        caption = f"<b>#{i}</b> — Совпадение: {score}%\n🔒 <i>Ссылка скрыта</i>"
 
         img_bytes = await get_image_bytes(face)
         if img_bytes:
@@ -676,24 +850,48 @@ async def execute_free_search(message: Message, bot: Bot, image_bytes: bytes):
         else:
             await message.answer(caption, reply_markup=get_unlock_keyboard(search_id, i - 1))
 
-    # Add "Unlock All" button
+    # Показываем тизер скрытых результатов
+    if hidden_count > 0:
+        await message.answer(
+            f"➕ <b>Ещё {hidden_count} результатов скрыто</b>\n"
+            f"<i>Разблокируйте чтобы увидеть!</i>"
+        )
+
+    # Извлекаем имена и показываем замаскированными
+    names = await extract_names_from_results(faces[:total_results])
+    if names:
+        teaser_lines = ["👤 <b>Найденные имена (скрыты):</b>\n"]
+        for url, name in list(names.items())[:5]:  # Показываем макс 5 тизеров
+            masked = mask_name(name)
+            teaser_lines.append(f"• {masked}")
+        teaser_lines.append(f"\n<i>Разблокируйте чтобы увидеть полные имена и ссылки!</i>")
+        await message.answer("\n".join(teaser_lines))
+
+    # Кнопка "Открыть все" с urgency
     await message.answer(
-        f"💡 <b>Совет:</b> Откройте все 10 ссылок сразу за {UNLOCK_ALL_STARS} ⭐ (экономия {UNLOCK_SINGLE_STARS * 10 - UNLOCK_ALL_STARS} ⭐)",
+        f"🔥 <b>Разблокировать все {total_results} результатов</b> — всего <b>{UNLOCK_ALL_STARS} ⭐</b>\n\n"
+        f"⏰ <b>Результаты исчезнут через 30 мин!</b>\n"
+        f"<i>Не потеряйте эти совпадения</i>",
         reply_markup=get_unlock_all_keyboard(search_id)
     )
 
-    # Extract and show names from VK profiles
-    names = await extract_names_from_results(faces[:10])
-    await send_name_summary(message, names)
+    # Отслеживаем событие завершения поиска
+    await db.track_event(message.from_user.id, "search_completed", {"type": "free", "results": total_results})
 
-    # Check API balance and alert if low
+    # Запланировать напоминание за 5 минут до истечения
+    reminder_task = asyncio.create_task(
+        schedule_expiry_reminder(bot, message.from_user.id, search_id)
+    )
+    pending_reminders[search_id] = reminder_task
+
+    # Проверяем баланс API и оповещаем если низкий
     await check_api_balance_and_alert(bot)
 
 
 @router.message()
 async def handle_other(message: Message):
     await message.answer(
-        "Пожалуйста, отправьте фото для поиска."
+        "📸 Отправьте фото для поиска по лицу."
     )
 
 
