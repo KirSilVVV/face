@@ -1474,8 +1474,8 @@ async def execute_paid_vk_search(message: Message, bot: Bot, image_bytes: bytes)
 
     await status_msg.edit_text(stats + "\nОтправка результатов...")
 
-    # Показываем 10 результатов со ссылками
-    for i, profile in enumerate(profiles[:10], 1):
+    # Показываем 3 результата со ссылками
+    for i, profile in enumerate(profiles[:3], 1):
         score = profile.get("score", 0)
         first_name = profile.get("first_name", "")
         last_name = profile.get("last_name", "")
@@ -1507,11 +1507,11 @@ async def execute_paid_vk_search(message: Message, bot: Bot, image_bytes: bytes)
     await status_msg.delete()
 
     # Отслеживаем событие
-    await db.track_event(message.from_user.id, "search_completed", {"type": "paid_vk", "results": min(len(profiles), 10)})
+    await db.track_event(message.from_user.id, "search_completed", {"type": "paid_vk", "results": min(len(profiles), 3)})
 
     # Уведомляем админа
     await notify_admin_search(bot, message.from_user.id, message.from_user.username,
-                              "vk", is_paid=True, results_count=min(len(profiles), 10))
+                              "vk", is_paid=True, results_count=min(len(profiles), 3))
 
 
 async def execute_free_tt_search(message: Message, bot: Bot, image_bytes: bytes):
@@ -1678,8 +1678,8 @@ async def execute_paid_tt_search(message: Message, bot: Bot, image_bytes: bytes)
 
     await status_msg.edit_text(stats + "\nОтправка результатов...")
 
-    # Показываем 10 результатов со ссылками
-    for i, profile in enumerate(profiles[:10], 1):
+    # Показываем 3 результата со ссылками
+    for i, profile in enumerate(profiles[:3], 1):
         score = profile.get("score", 0)
         first_name = profile.get("first_name", "")
         last_name = profile.get("last_name", "")
@@ -1710,11 +1710,11 @@ async def execute_paid_tt_search(message: Message, bot: Bot, image_bytes: bytes)
     await status_msg.delete()
 
     # Отслеживаем событие
-    await db.track_event(message.from_user.id, "search_completed", {"type": "paid_tt", "results": min(len(profiles), 10)})
+    await db.track_event(message.from_user.id, "search_completed", {"type": "paid_tt", "results": min(len(profiles), 3)})
 
     # Уведомляем админа
     await notify_admin_search(bot, message.from_user.id, message.from_user.username,
-                              "tiktok", is_paid=True, results_count=min(len(profiles), 10))
+                              "tiktok", is_paid=True, results_count=min(len(profiles), 3))
 
 
 @router.message()
