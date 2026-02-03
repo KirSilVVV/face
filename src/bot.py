@@ -64,6 +64,33 @@ async def check_api_balance_and_alert(bot: Bot):
     except Exception as e:
         logger.error(f"Balance check error: {e}")
 
+
+async def notify_admin_search(bot: Bot, user_id: int, username: str | None,
+                              search_type: str, is_paid: bool, results_count: int):
+    """Notify admin about completed search."""
+    if not ADMIN_CHAT_ID:
+        return
+
+    try:
+        type_icons = {
+            "internet": "🌐",
+            "vk": "📱",
+            "tiktok": "🎵"
+        }
+        icon = type_icons.get(search_type, "🔍")
+        paid_text = "💰 Платный" if is_paid else "🆓 Бесплатный"
+        user_link = f"@{username}" if username else f"ID: {user_id}"
+
+        await bot.send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text=f"{icon} <b>Поиск: {search_type.upper()}</b>\n"
+                 f"👤 {user_link}\n"
+                 f"{paid_text}\n"
+                 f"📊 Результатов: {results_count}"
+        )
+    except Exception as e:
+        logger.error(f"Admin notification error: {e}")
+
 # Store pending search results temporarily (search_id -> {result, created_at, user_id, unlocked})
 pending_results: dict[str, dict] = {}
 
@@ -1086,6 +1113,10 @@ async def execute_paid_search(message: Message, bot: Bot, image_bytes: bytes):
     # Отслеживаем событие завершения поиска
     await db.track_event(message.from_user.id, "search_completed", {"type": "paid", "results": min(len(faces), 10)})
 
+    # Уведомляем админа
+    await notify_admin_search(bot, message.from_user.id, message.from_user.username,
+                              "internet", is_paid=True, results_count=min(len(faces), 10))
+
     # Проверяем баланс API и оповещаем если низкий
     await check_api_balance_and_alert(bot)
 
@@ -1254,6 +1285,10 @@ async def execute_free_search(message: Message, bot: Bot, image_bytes: bytes):
     # Отслеживаем событие завершения поиска
     await db.track_event(message.from_user.id, "search_completed", {"type": "free", "results": total_results})
 
+    # Уведомляем админа
+    await notify_admin_search(bot, message.from_user.id, message.from_user.username,
+                              "internet", is_paid=False, results_count=total_results)
+
     # Запланировать напоминание за 5 минут до истечения
     reminder_task = asyncio.create_task(
         schedule_expiry_reminder(bot, message.from_user.id, search_id)
@@ -1375,6 +1410,9 @@ async def execute_free_vk_search(message: Message, bot: Bot, image_bytes: bytes)
     # Отслеживаем событие
     await db.track_event(message.chat.id, "search_completed", {"type": "free_vk", "results": total_results})
 
+    # Уведомляем админа
+    await notify_admin_search(bot, message.chat.id, None, "vk", is_paid=False, results_count=total_results)
+
     # Напоминание
     reminder_task = asyncio.create_task(
         schedule_expiry_reminder(bot, message.chat.id, search_id)
@@ -1470,6 +1508,10 @@ async def execute_paid_vk_search(message: Message, bot: Bot, image_bytes: bytes)
 
     # Отслеживаем событие
     await db.track_event(message.from_user.id, "search_completed", {"type": "paid_vk", "results": min(len(profiles), 10)})
+
+    # Уведомляем админа
+    await notify_admin_search(bot, message.from_user.id, message.from_user.username,
+                              "vk", is_paid=True, results_count=min(len(profiles), 10))
 
 
 async def execute_free_tt_search(message: Message, bot: Bot, image_bytes: bytes):
@@ -1577,6 +1619,9 @@ async def execute_free_tt_search(message: Message, bot: Bot, image_bytes: bytes)
     # Отслеживаем событие
     await db.track_event(message.chat.id, "search_completed", {"type": "free_tt", "results": total_results})
 
+    # Уведомляем админа
+    await notify_admin_search(bot, message.chat.id, None, "tiktok", is_paid=False, results_count=total_results)
+
     # Напоминание
     reminder_task = asyncio.create_task(
         schedule_expiry_reminder(bot, message.chat.id, search_id)
@@ -1666,6 +1711,10 @@ async def execute_paid_tt_search(message: Message, bot: Bot, image_bytes: bytes)
 
     # Отслеживаем событие
     await db.track_event(message.from_user.id, "search_completed", {"type": "paid_tt", "results": min(len(profiles), 10)})
+
+    # Уведомляем админа
+    await notify_admin_search(bot, message.from_user.id, message.from_user.username,
+                              "tiktok", is_paid=True, results_count=min(len(profiles), 10))
 
 
 @router.message()
