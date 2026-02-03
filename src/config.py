@@ -12,8 +12,9 @@ ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")  # Your Telegram ID for alerts
 
 FACECHECK_BASE_URL = "https://facecheck.id/api"
 
-# VK search pricing (search4faces.com)
+# Social search pricing (search4faces.com)
 VK_SEARCH_COST_STARS = 1  # Testing price - change back to 50 for production
+TT_SEARCH_COST_STARS = 1  # TikTok search - testing price
 
 # Pricing (aggressive x3 margin)
 SEARCH_COST_STARS = 75          # Single search

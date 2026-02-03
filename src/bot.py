@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 from src.config import (
     TELEGRAM_BOT_TOKEN, SEARCH_COST_STARS, SEARCH_PACK_5_STARS,
     UNLOCK_SINGLE_STARS, UNLOCK_ALL_STARS, ADMIN_CHAT_ID,
-    API_BALANCE_ALERT_THRESHOLD, VK_SEARCH_COST_STARS
+    API_BALANCE_ALERT_THRESHOLD, VK_SEARCH_COST_STARS, TT_SEARCH_COST_STARS
 )
 from src.facecheck_client import FaceCheckClient
 from src.search4faces_client import Search4FacesClient
@@ -153,6 +153,7 @@ WELCOME_MESSAGE = f"""<b>🔍 Бот Поиска по Лицу</b>
 • Первый поиск: <b>БЕСПЛАТНО</b> ({FREE_RESULTS_COUNT} результата)
 • Поиск по интернету: <b>{SEARCH_COST_STARS} ⭐</b>
 • Поиск по VK: <b>{VK_SEARCH_COST_STARS} ⭐</b>
+• Поиск по TikTok: <b>{TT_SEARCH_COST_STARS} ⭐</b>
 
 <b>📋 Команды:</b>
 /buy — Купить поиски
@@ -164,12 +165,14 @@ WELCOME_MESSAGE = f"""<b>🔍 Бот Поиска по Лицу</b>
 def get_mode_keyboard(current_mode: str = None) -> InlineKeyboardMarkup:
     """Create keyboard for selecting search mode."""
     internet_text = "🌐 Интернет" + (" ✓" if current_mode == "internet" else "")
-    vk_text = "📱 ВКонтакте" + (" ✓" if current_mode == "vk" else "")
+    vk_text = "📱 VK" + (" ✓" if current_mode == "vk" else "")
+    tt_text = "🎵 TikTok" + (" ✓" if current_mode == "tiktok" else "")
 
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text=internet_text, callback_data="mode_internet"),
-            InlineKeyboardButton(text=vk_text, callback_data="mode_vk")
+            InlineKeyboardButton(text=vk_text, callback_data="mode_vk"),
+            InlineKeyboardButton(text=tt_text, callback_data="mode_tiktok")
         ],
     ])
 
@@ -178,25 +181,27 @@ def get_search_confirm_keyboard(mode: str) -> InlineKeyboardMarkup:
     """Create keyboard to confirm search or change mode."""
     if mode == "vk":
         return InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(
-                text=f"🔍 Искать в VK",
-                callback_data="confirm_search"
-            )],
-            [InlineKeyboardButton(
-                text="🔄 Изменить на Интернет",
-                callback_data="switch_to_internet"
-            )],
+            [InlineKeyboardButton(text="🔍 Искать в VK", callback_data="confirm_search")],
+            [
+                InlineKeyboardButton(text="🔄 Интернет", callback_data="switch_to_internet"),
+                InlineKeyboardButton(text="🔄 TikTok", callback_data="switch_to_tiktok")
+            ],
         ])
-    else:
+    elif mode == "tiktok":
         return InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(
-                text=f"🔍 Искать в Интернете",
-                callback_data="confirm_search"
-            )],
-            [InlineKeyboardButton(
-                text="🔄 Изменить на VK",
-                callback_data="switch_to_vk"
-            )],
+            [InlineKeyboardButton(text="🔍 Искать в TikTok", callback_data="confirm_search")],
+            [
+                InlineKeyboardButton(text="🔄 Интернет", callback_data="switch_to_internet"),
+                InlineKeyboardButton(text="🔄 VK", callback_data="switch_to_vk")
+            ],
+        ])
+    else:  # internet
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔍 Искать в Интернете", callback_data="confirm_search")],
+            [
+                InlineKeyboardButton(text="🔄 VK", callback_data="switch_to_vk"),
+                InlineKeyboardButton(text="🔄 TikTok", callback_data="switch_to_tiktok")
+            ],
         ])
 
 
@@ -319,7 +324,8 @@ async def cmd_start(message: Message):
         user_search_mode[user_id] = "internet"
 
     current_mode = user_search_mode[user_id]
-    mode_text = "🌐 Интернет" if current_mode == "internet" else "📱 ВКонтакте"
+    mode_texts = {"internet": "🌐 Интернет", "vk": "📱 VK", "tiktok": "🎵 TikTok"}
+    mode_text = mode_texts.get(current_mode, "🌐 Интернет")
 
     # Проверка ежедневного бонуса
     granted = await db.check_and_grant_daily_free_search(user_id)
@@ -563,6 +569,18 @@ async def handle_mode_vk(callback: CallbackQuery):
     await callback.answer("Режим: ВКонтакте")
 
 
+@router.callback_query(F.data == "mode_tiktok")
+async def handle_mode_tiktok(callback: CallbackQuery):
+    """Пользователь выбрал режим TikTok."""
+    user_id = callback.from_user.id
+    user_search_mode[user_id] = "tiktok"
+
+    await callback.message.edit_reply_markup(
+        reply_markup=get_mode_keyboard("tiktok")
+    )
+    await callback.answer("Режим: TikTok")
+
+
 @router.callback_query(F.data == "switch_to_internet")
 async def handle_switch_to_internet(callback: CallbackQuery):
     """Переключить на Интернет перед поиском."""
@@ -602,11 +620,34 @@ async def handle_switch_to_vk(callback: CallbackQuery):
 
     await callback.message.edit_text(
         f"📸 <b>Фото готово к поиску</b>\n\n"
-        f"<b>Режим:</b> 📱 ВКонтакте\n"
+        f"<b>Режим:</b> 📱 VK\n"
         f"<b>Цена:</b> {price_text}",
         reply_markup=get_search_confirm_keyboard("vk")
     )
     await callback.answer("Режим изменён на VK")
+
+
+@router.callback_query(F.data == "switch_to_tiktok")
+async def handle_switch_to_tiktok(callback: CallbackQuery):
+    """Переключить на TikTok перед поиском."""
+    user_id = callback.from_user.id
+    user_search_mode[user_id] = "tiktok"
+
+    credits = await db.get_user_credits(user_id)
+    free_searches = credits.get("free_searches", 0)
+
+    if free_searches > 0:
+        price_text = "БЕСПЛАТНО"
+    else:
+        price_text = f"{TT_SEARCH_COST_STARS} ⭐"
+
+    await callback.message.edit_text(
+        f"📸 <b>Фото готово к поиску</b>\n\n"
+        f"<b>Режим:</b> 🎵 TikTok\n"
+        f"<b>Цена:</b> {price_text}",
+        reply_markup=get_search_confirm_keyboard("tiktok")
+    )
+    await callback.answer("Режим изменён на TikTok")
 
 
 @router.callback_query(F.data == "confirm_search")
@@ -629,21 +670,35 @@ async def handle_confirm_search(callback: CallbackQuery, bot: Bot):
         if free_searches > 0:
             await execute_free_vk_search(callback.message, bot, image_bytes)
         else:
-            pending_photos[user_id] = image_bytes  # Возвращаем фото для платного поиска
+            pending_photos[user_id] = image_bytes
             await db.track_event(user_id, "payment_clicked", {"type": "vk_search"})
             await bot.send_invoice(
                 chat_id=user_id,
-                title="Поиск по ВКонтакте",
+                title="Поиск по VK",
                 description="10 результатов профилей VK",
                 payload="paid_search_vk",
                 currency="XTR",
                 prices=[LabeledPrice(label="Поиск по VK", amount=VK_SEARCH_COST_STARS)],
             )
-    else:
+    elif mode == "tiktok":
+        if free_searches > 0:
+            await execute_free_tt_search(callback.message, bot, image_bytes)
+        else:
+            pending_photos[user_id] = image_bytes
+            await db.track_event(user_id, "payment_clicked", {"type": "tiktok_search"})
+            await bot.send_invoice(
+                chat_id=user_id,
+                title="Поиск по TikTok",
+                description="10 результатов профилей TikTok",
+                payload="paid_search_tt",
+                currency="XTR",
+                prices=[LabeledPrice(label="Поиск по TikTok", amount=TT_SEARCH_COST_STARS)],
+            )
+    else:  # internet
         if free_searches > 0:
             await execute_free_search(callback.message, bot, image_bytes)
         else:
-            pending_photos[user_id] = image_bytes  # Возвращаем фото для платного поиска
+            pending_photos[user_id] = image_bytes
             await db.track_event(user_id, "payment_clicked", {"type": "internet_search"})
             await bot.send_invoice(
                 chat_id=user_id,
@@ -800,6 +855,19 @@ async def handle_successful_payment(message: Message, bot: Bot):
         image_bytes = pending_photos.pop(user_id)
         await execute_paid_vk_search(message, bot, image_bytes)
 
+    elif payload == "paid_search_tt":
+        # Пользователь оплатил поиск по TikTok — выполняем его
+        await db.record_payment(user_id, stars, 1, payment_id)
+
+        if user_id not in pending_photos:
+            await message.answer(
+                "Оплата получена, но фото не найдено. Отправьте новое фото."
+            )
+            return
+
+        image_bytes = pending_photos.pop(user_id)
+        await execute_paid_tt_search(message, bot, image_bytes)
+
     elif payload == "buy_1_search":
         # Добавляем 1 поиск
         await db.add_paid_searches(user_id, 1)
@@ -830,11 +898,13 @@ async def handle_successful_payment(message: Message, bot: Bot):
             results = pending_results[search_id]
             results["_unlocked"] = True  # Помечаем как разблокированные
 
-            # Проверяем источник результатов (VK или интернет)
-            if results.get("_source") == "vk":
-                # VK результаты
+            # Проверяем источник результатов (VK, TikTok или интернет)
+            source = results.get("_source")
+            if source in ("vk", "tiktok"):
+                # VK или TikTok результаты
                 profiles = results.get("profiles", [])[:10]
-                lines = ["🔓 <b>Все профили VK открыты!</b>\n"]
+                source_name = "VK" if source == "vk" else "TikTok"
+                lines = [f"🔓 <b>Все профили {source_name} открыты!</b>\n"]
                 for i, p in enumerate(profiles, 1):
                     score = p.get("score", 0)
                     first = p.get("first_name", "")
@@ -877,9 +947,12 @@ async def handle_successful_payment(message: Message, bot: Bot):
 
     elif payload.startswith("unlock_"):
         parts = payload.split("_")
-        # Для VK: unlock_vk_123_0, для интернета: unlock_123_0
+        # Для VK: unlock_vk_123_0, TikTok: unlock_tt_123_0, интернета: unlock_123_0
         if parts[1] == "vk":
             search_id = f"vk_{parts[2]}"
+            result_index = int(parts[3])
+        elif parts[1] == "tt":
+            search_id = f"tt_{parts[2]}"
             result_index = int(parts[3])
         else:
             search_id = parts[1]
@@ -887,9 +960,10 @@ async def handle_successful_payment(message: Message, bot: Bot):
 
         if search_id in pending_results and not is_result_expired(search_id):
             results = pending_results[search_id]
+            source = results.get("_source")
 
-            if results.get("_source") == "vk":
-                # VK результаты
+            if source in ("vk", "tiktok"):
+                # VK или TikTok результаты
                 profiles = results.get("profiles", [])
                 if result_index < len(profiles):
                     p = profiles[result_index]
@@ -898,9 +972,10 @@ async def handle_successful_payment(message: Message, bot: Bot):
                     last = p.get("last_name", "")
                     name = f"{first} {last}".strip() or "Без имени"
                     url = p.get("profile", "N/A")
+                    source_name = "VK" if source == "vk" else "TikTok"
 
                     await message.answer(
-                        f"🔓 <b>Профиль VK открыт!</b>\n\n"
+                        f"🔓 <b>Профиль {source_name} открыт!</b>\n\n"
                         f"Совпадение: {score}%\n"
                         f"👤 {name}\n"
                         f"🔗 {url}",
@@ -1043,10 +1118,13 @@ async def handle_photo(message: Message, bot: Bot):
 
     # Формируем текст подтверждения
     if mode == "vk":
-        mode_text = "📱 ВКонтакте"
+        mode_text = "📱 VK"
         price = VK_SEARCH_COST_STARS
+    elif mode == "tiktok":
+        mode_text = "🎵 TikTok"
+        price = TT_SEARCH_COST_STARS
     else:
-        mode_text = "🌐 Интернет (все сайты)"
+        mode_text = "🌐 Интернет"
         price = SEARCH_COST_STARS
 
     if free_searches > 0:
@@ -1392,6 +1470,202 @@ async def execute_paid_vk_search(message: Message, bot: Bot, image_bytes: bytes)
 
     # Отслеживаем событие
     await db.track_event(message.from_user.id, "search_completed", {"type": "paid_vk", "results": min(len(profiles), 10)})
+
+
+async def execute_free_tt_search(message: Message, bot: Bot, image_bytes: bytes):
+    """Бесплатный поиск по TikTok: показываем 3 результата со скрытыми ссылками."""
+    status_msg = await message.answer("🔍 Поиск по TikTok...")
+
+    last_progress_text = ""
+
+    async def on_progress(progress: int):
+        nonlocal last_progress_text
+        new_text = f"🔍 Поиск по TikTok... {progress}%"
+        if new_text != last_progress_text:
+            try:
+                await status_msg.edit_text(new_text)
+                last_progress_text = new_text
+            except TelegramBadRequest:
+                pass
+
+    result = await search4faces.search_vk(image_bytes, source="tt_avatar", results_count=10, on_progress=on_progress)
+
+    if not result:
+        await status_msg.edit_text("Ошибка поиска. Попробуйте снова.")
+        return
+
+    if result.get("error"):
+        await status_msg.edit_text(f"Ошибка: {result['error']}")
+        return
+
+    # Используем бесплатный поиск
+    await db.use_search(message.chat.id)
+
+    profiles = result.get("profiles", [])
+
+    stats = (
+        f"<b>✅ Поиск по TikTok завершён</b>\n\n"
+        f"Результатов: {len(profiles)}\n"
+    )
+
+    if not profiles:
+        await status_msg.edit_text(stats + "\n<i>Совпадений не найдено.</i>")
+        return
+
+    # Сохраняем результаты с timestamp
+    search_id = f"tt_{message.message_id}"
+    tt_result = {
+        "profiles": profiles,
+        "_created_at": time.time(),
+        "_source": "tiktok"
+    }
+    pending_results[search_id] = tt_result
+    last_search_by_user[message.chat.id] = search_id
+
+    total_results = min(len(profiles), 10)
+    hidden_count = total_results - FREE_RESULTS_COUNT
+
+    await status_msg.edit_text(
+        stats +
+        f"\n⏰ <b>Результаты действуют 30 минут!</b>\n"
+        f"<i>🔒 Показано {FREE_RESULTS_COUNT} из {total_results}. "
+        f"Разблокируйте все за {UNLOCK_ALL_STARS} ⭐</i>"
+    )
+
+    # Показываем FREE_RESULTS_COUNT результатов
+    for i, profile in enumerate(profiles[:FREE_RESULTS_COUNT], 1):
+        score = profile.get("score", 0)
+        first_name = profile.get("first_name", "")
+        last_name = profile.get("last_name", "")
+        name = f"{first_name} {last_name}".strip() or "Имя скрыто"
+
+        caption = f"<b>#{i}</b> — Совпадение: {score}%\n👤 {mask_name(name)}\n🔒 <i>Ссылка скрыта</i>"
+
+        photo_url = profile.get("source") or profile.get("face")
+        img_bytes = None
+        if photo_url:
+            img_bytes = await fetch_image_from_url(photo_url)
+
+        if img_bytes:
+            try:
+                photo_file = BufferedInputFile(img_bytes, filename=f"tt_{i}.jpg")
+                await message.answer_photo(
+                    photo_file,
+                    caption=caption,
+                    reply_markup=get_unlock_keyboard(search_id, i - 1)
+                )
+            except Exception as e:
+                logger.error(f"Send TT photo error: {e}")
+                await message.answer(caption, reply_markup=get_unlock_keyboard(search_id, i - 1))
+        else:
+            await message.answer(caption, reply_markup=get_unlock_keyboard(search_id, i - 1))
+
+    # Тизер скрытых результатов
+    if hidden_count > 0:
+        await message.answer(
+            f"➕ <b>Ещё {hidden_count} профилей TikTok скрыто</b>\n"
+            f"<i>Разблокируйте чтобы увидеть!</i>"
+        )
+
+    # Кнопка "Открыть все"
+    await message.answer(
+        f"🔥 <b>Разблокировать все {total_results} профилей TikTok</b> — всего <b>{UNLOCK_ALL_STARS} ⭐</b>\n\n"
+        f"⏰ <b>Результаты исчезнут через 30 мин!</b>",
+        reply_markup=get_unlock_all_keyboard(search_id)
+    )
+
+    # Отслеживаем событие
+    await db.track_event(message.chat.id, "search_completed", {"type": "free_tt", "results": total_results})
+
+    # Напоминание
+    reminder_task = asyncio.create_task(
+        schedule_expiry_reminder(bot, message.chat.id, search_id)
+    )
+    pending_reminders[search_id] = reminder_task
+
+
+async def execute_paid_tt_search(message: Message, bot: Bot, image_bytes: bytes):
+    """Платный поиск по TikTok: показываем 10 результатов со ссылками."""
+    status_msg = await message.answer("🔍 Поиск по TikTok...")
+
+    last_progress_text = ""
+
+    async def on_progress(progress: int):
+        nonlocal last_progress_text
+        new_text = f"🔍 Поиск по TikTok... {progress}%"
+        if new_text != last_progress_text:
+            try:
+                await status_msg.edit_text(new_text)
+                last_progress_text = new_text
+            except TelegramBadRequest:
+                pass
+
+    result = await search4faces.search_vk(image_bytes, source="tt_avatar", results_count=10, on_progress=on_progress)
+
+    if not result:
+        await status_msg.edit_text("Ошибка поиска. Попробуйте снова.")
+        return
+
+    if result.get("error"):
+        await status_msg.edit_text(f"Ошибка: {result['error']}")
+        return
+
+    profiles = result.get("profiles", [])
+
+    stats = (
+        f"<b>✅ Поиск по TikTok завершён</b>\n\n"
+        f"Результатов: {min(len(profiles), 10)}\n"
+    )
+
+    if not profiles:
+        await status_msg.edit_text(stats + "\n<i>Совпадений не найдено.</i>")
+        return
+
+    # Сохраняем результаты
+    search_id = f"tt_{message.message_id}"
+    tt_result = {
+        "profiles": profiles,
+        "_created_at": time.time(),
+        "_source": "tiktok"
+    }
+    pending_results[search_id] = tt_result
+    last_search_by_user[message.from_user.id] = search_id
+
+    await status_msg.edit_text(stats + "\nОтправка результатов...")
+
+    # Показываем 10 результатов со ссылками
+    for i, profile in enumerate(profiles[:10], 1):
+        score = profile.get("score", 0)
+        first_name = profile.get("first_name", "")
+        last_name = profile.get("last_name", "")
+        name = f"{first_name} {last_name}".strip() or "Без имени"
+        tt_url = profile.get("profile", "N/A")
+
+        caption = f"<b>#{i}</b> — Совпадение: {score}%\n👤 {name}\n🔗 {tt_url}"
+
+        photo_url = profile.get("source") or profile.get("face")
+        img_bytes = None
+        if photo_url:
+            img_bytes = await fetch_image_from_url(photo_url)
+
+        if img_bytes:
+            try:
+                photo_file = BufferedInputFile(img_bytes, filename=f"tt_{i}.jpg")
+                await message.answer_photo(
+                    photo_file,
+                    caption=caption,
+                    link_preview_options=LinkPreviewOptions(is_disabled=True)
+                )
+            except Exception as e:
+                logger.error(f"Send TT photo error: {e}")
+                await message.answer(caption, link_preview_options=LinkPreviewOptions(is_disabled=True))
+        else:
+            await message.answer(caption, link_preview_options=LinkPreviewOptions(is_disabled=True))
+
+    await status_msg.delete()
+
+    # Отслеживаем событие
+    await db.track_event(message.from_user.id, "search_completed", {"type": "paid_tt", "results": min(len(profiles), 10)})
 
 
 @router.message()
