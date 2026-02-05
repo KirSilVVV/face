@@ -29,6 +29,8 @@ from src.facecheck_client import FaceCheckClient
 from src.search4faces_client import Search4FacesClient
 from src import database as db
 from src import vk_client
+from src.gift_card_handlers import register_gift_card_handlers
+from aiogram.fsm.storage.memory import MemoryStorage
 
 router = Router()
 facecheck = FaceCheckClient()
@@ -1729,6 +1731,12 @@ def create_bot() -> tuple[Bot, Dispatcher]:
         token=TELEGRAM_BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML)
     )
-    dp = Dispatcher()
+    # Initialize Dispatcher with FSM storage for gift cards
+    dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
+
+    # Register gift card handlers
+    register_gift_card_handlers(router)
+
     return bot, dp
+
