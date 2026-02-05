@@ -1733,10 +1733,12 @@ def create_bot() -> tuple[Bot, Dispatcher]:
     )
     # Initialize Dispatcher with FSM storage for gift cards
     dp = Dispatcher(storage=MemoryStorage())
-    dp.include_router(router)
 
-    # Register gift card handlers
+    # Register gift card handlers FIRST
     register_gift_card_handlers(router)
+
+    # Then include router
+    dp.include_router(router)
 
     return bot, dp
 
