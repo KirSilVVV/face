@@ -3,7 +3,7 @@ Gift Card Handlers for Aiogram Bot
 """
 
 from aiogram import F, Router
-from aiogram.types import Message
+from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -86,9 +86,22 @@ async def cmd_myredemptions(message: Message):
     await message.answer(stats_text)
 
 
+async def callback_redeem(query, state: FSMContext):
+    """Handle redeem button callback."""
+    await query.answer()
+    await state.set_state(GiftCardStates.waiting_for_code)
+    await query.message.answer(
+        "🎁 <b>Активировать подарочную карту</b>\n\n"
+        "Отправьте код:\n\n"
+        "Формат: XXXX-XXXX-XXXX\n\n"
+        "/cancel - Отмена"
+    )
+
+
 def register_gift_card_handlers(router: Router):
     """Register all gift card handlers to the router."""
     router.message.register(cmd_redeem, Command("redeem"))
+    router.callback_query.register(callback_redeem, F.data == "cmd_redeem")
     router.message.register(process_gift_code, GiftCardStates.waiting_for_code)
     router.message.register(cmd_cancel, Command("cancel"))
     router.message.register(cmd_giftcards_stats, Command("giftcards"))
