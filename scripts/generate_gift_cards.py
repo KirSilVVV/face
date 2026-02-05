@@ -19,23 +19,25 @@ from src import database as db
 
 async def batch_create(count: int, searches: int):
     """Create batch of gift cards."""
-    print(f"Creating {count} gift cards with {searches} searches each...")
+    print(f"Creating {count} gift cards with {searches} searches each...\n")
 
-    for i in range(count):
-        code = gift_card_manager.generate_code()
-        success = await gift_card_manager.create_gift_card(
-            code=code,
-            searches_amount=searches,
-            batch_id=f"batch_{i+1}"
-        )
+    cards = await gift_card_manager.create_gift_cards(
+        count=count,
+        searches_amount=searches
+    )
 
-        if success:
-            print(f"✓ {code} ({searches} searches)")
+    if not cards:
+        print("❌ Error: No cards were created")
+        return
 
-        if (i + 1) % 10 == 0:
-            print(f"  Progress: {i+1}/{count}")
+    for i, card in enumerate(cards, 1):
+        code = card.get('code', 'UNKNOWN')
+        print(f"✓ {code}")
 
-    print(f"\n✅ Created {count} gift cards!")
+        if i % 10 == 0:
+            print(f"  Progress: {i}/{count}")
+
+    print(f"\n✅ Successfully created {len(cards)} gift cards!")
 
 
 async def show_stats():
