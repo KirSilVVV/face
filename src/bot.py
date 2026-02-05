@@ -186,6 +186,7 @@ WELCOME_MESSAGE = f"""<b>🔍 Бот Поиска по Лицу</b>
 
 <b>📋 Команды:</b>
 /buy — Купить поиски
+/redeem — Активировать подарочный код
 /stars — Купить звёзды дешевле
 
 <i>Данные из открытых источников. Фото не сохраняются.</i>"""
@@ -203,6 +204,7 @@ def get_mode_keyboard(current_mode: str = None) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text=vk_text, callback_data="mode_vk"),
             InlineKeyboardButton(text=tt_text, callback_data="mode_tiktok")
         ],
+        [InlineKeyboardButton(text="🎁 Kod", callback_data="cmd_redeem")],
     ])
 
 
